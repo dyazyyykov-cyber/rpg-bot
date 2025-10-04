@@ -42,3 +42,5 @@ class Inventory(Base):
     player_id = Column(String, ForeignKey("players.id"))
     item_id = Column(String, ForeignKey("items.id"))
     quantity = Column(Integer, default=1)
+
+# End of models
