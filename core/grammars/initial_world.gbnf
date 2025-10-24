@@ -1,0 +1,69 @@
+root               ::= ws "{" ws
+                       "\"setting\"" ws ":" ws string ws "," ws
+                       "\"location\"" ws ":" ws string ws "," ws
+                       "\"world_flags\"" ws ":" ws object_any ws "," ws
+                       "\"npcs\"" ws ":" ws "[" ws npc ( ws "," ws npc )? ws "]" ws "," ws
+                       "\"available_items\"" ws ":" ws "[" ws avail_item ( ws "," ws avail_item ( ws "," ws avail_item )? )? ws "]" ws "," ws
+                       "\"roles_catalog\"" ws ":" ws "[" ws role ws "," ws role ws "," ws role ws "," ws role ws "," ws role ws "," ws role ws "]" ws "," ws
+                       "\"visibility_defaults\"" ws ":" ws vis_defaults ws "," ws
+                       "\"style\"" ws ":" ws style ws "," ws
+                       "\"opening_hook\"" ws ":" ws string ws
+                       "}" ws
+
+npc                ::= "{" ws
+                       "\"id\"" ws ":" ws string ws "," ws
+                       "\"name\"" ws ":" ws string ws "," ws
+                       "\"mood\"" ws ":" ws string ws "," ws
+                       "\"hp\"" ws ":" ws int30_300 ws "," ws
+                       "\"items\"" ws ":" ws "[" ws ( string ( ws "," ws string )* )? ws "]" ws
+                       "}"
+
+avail_item         ::= "{" ws
+                       "\"name\"" ws ":" ws string ws "," ws
+                       "\"source\"" ws ":" ws string ws
+                       "}"
+
+role               ::= "{" ws
+                       "\"role\"" ws ":" ws string ws "," ws
+                       "\"summary\"" ws ":" ws string ws "," ws
+                       "\"base_hp\"" ws ":" ws int60_300 ws "," ws
+                       "\"soft_stats\"" ws ":" ws "{" ws
+                           "\"\u0445\u0430\u0440\u0438\u0437\u043c\u0430\"" ws ":" ws int0_5 ws "," ws
+                           "\"\u0432\u043d\u0438\u043c\u0430\u0442\u0435\u043b\u044c\u043d\u043e\u0441\u0442\u044c\"" ws ":" ws int0_5 ws "," ws
+                           "\"\u0443\u0434\u0430\u0447\u0430\"" ws ":" ws int0_5 ws "," ws
+                           "\"\u0430\u0432\u0442\u043e\u0440\u0438\u0442\u0435\u0442\"" ws ":" ws int0_5 ws
+                       ws "}" ws "," ws
+                       "\"job_status\"" ws ":" ws "{" ws
+                           "\"\u0434\u043e\u043b\u0436\u043d\u043e\u0441\u0442\u044c\"" ws ":" ws string ws "," ws
+                           "\"\u0443\u0440\u043e\u0432\u0435\u043d\u044c_\u0434\u043e\u0441\u0442\u0443\u043f\u0430\"" ws ":" ws string
+                       ws "}" ws
+                       "}"
+
+vis_defaults       ::= "{" ws
+                       "\"perception_dc\"" ws ":" ws int1_30 ws "," ws
+                       "\"public_on_panic\"" ws ":" ws ( "true" | "false" ) ws
+                       "}"
+
+style              ::= "{" ws
+                       "\"tone\"" ws ":" ws string ws "," ws
+                       "\"pace\"" ws ":" ws string ws
+                       "}"
+
+object_any         ::= "{" ws ( string ws ":" ws value_any ( ws "," ws string ws ":" ws value_any )* )? ws "}"
+array_any          ::= "[" ws ( value_any ( ws "," ws value_any )* )? ws "]"
+value_any          ::= string | number_any | object_any | array_any | "true" | "false" | "null"
+
+string             ::= "\"" chars "\""
+chars              ::= char*
+char               ::= [^"\\] | escape
+escape             ::= "\\" ( "\"" | "\\" | "/" | "b" | "f" | "n" | "r" | "t" | "u" hex hex hex hex )
+hex                ::= [0-9a-fA-F]
+
+number_any         ::= "-"? ( "0" | [1-9][0-9]* ) ( "." [0-9]+ )? ( [eE] [+-]? [0-9]+ )?
+
+int0_5             ::= "0" | "1" | "2" | "3" | "4" | "5"
+int1_30            ::= [1-9] | [12][0-9] | "30"
+int30_300          ::= "30" | "3"[1-9] | [4-9][0-9] | [12][0-9][0-9] | "300"
+int60_300          ::= [6-9][0-9] | [12][0-9][0-9] | "300"
+
+ws                 ::= [ \t\r\n]*
