@@ -493,8 +493,12 @@ def push_private_story(state: dict, player_id: str, story, *, keep_last: int = 5
     state["private_history"] = [entry]
 
 
-def push_general_story(state: Dict[str, Any], story: Union[GeneralStory, Dict[str, Any]]) -> None:
-    state.setdefault("general_history", []).append(_as_dict(story))
+def push_general_story(state: Dict[str, Any], story: Union[GeneralStory, Dict[str, Any]], *, keep_last: int = 80) -> None:
+    history = state.setdefault("general_history", [])
+    entry = _as_dict(story)
+    history.append(entry)
+    if keep_last and len(history) > keep_last:
+        state["general_history"] = history[-keep_last:]
 
 # ---------------------------- Факты для General ----------------------------
 

@@ -39,7 +39,6 @@ Storylets — мини-сцены/правила, позволяющие:
 Никаких внешних импортов, всё чистый Python 3.10+.
 """
 import re
-import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
@@ -114,9 +113,28 @@ _INTENT_PATTERNS_EN: List[Tuple[str, List[str]]] = [
 ]
 
 _BRAND_OR_MEME_CLUES = [
-    "марио", "супермарио", "super mario", "пикачу", "гандам", "ивангай", "четкий паца", "кринж",
-    "mario", "zelda", "sonic", "doom", "tetris", "warhammer", "skr", "sigma", "gyat"
+    "марио", "супермарио", "super mario", "пикачу", "гандам", "ивангай", "четкий паца", "чёткий паца",
+    "пац", "паца", "кринж", "mario", "zelda", "sonic", "doom", "tetris", "warhammer", "skr", "sigma",
+    "gyat", "slava kpss", "слава кпсс"
 ]
+
+
+def _extract_brand_term(text: str) -> str:
+    """Возвращает наиболее осмысленное отображение бренда/мема из текста."""
+    original = text or ""
+    text_lc = _lc(original)
+    best = ""
+    best_len = -1
+    for clue in sorted(_BRAND_OR_MEME_CLUES, key=len, reverse=True):
+        idx = text_lc.find(clue)
+        if idx < 0:
+            continue
+        candidate = original[idx : idx + len(clue)]
+        candidate = candidate.strip().strip("«»'\".,!? ")
+        if len(clue) > best_len and candidate:
+            best = candidate
+            best_len = len(clue)
+    return best
 
 def _detect_lang(text: str) -> str:
     # Очень простая эвристика: наличие кириллицы => ru.
@@ -275,10 +293,8 @@ def _guard_brand_yes_and(state: Dict[str, Any], action: Dict[str, Any]) -> bool:
     return any(k in t for k in _BRAND_OR_MEME_CLUES)
 
 def _effect_brand_yes_and(state: Dict[str, Any], action: Dict[str, Any]) -> Dict[str, Any]:
-    t = _lc(action.get("text"))
     eff = _ensure_effect_skeleton()
-    terms = [k for k in _BRAND_OR_MEME_CLUES if k in t]
-    key = sorted(terms, key=len, reverse=True)[0] if terms else "мем"
+    key = _extract_brand_term(action.get("text") or "") or "мем"
     eff["introductions"]["items"].append({"name": f"культурный артефакт «{key}»", "meta": "brand"})
     eff["_storylet_context"] = {"key": key}
     return eff
@@ -299,9 +315,13 @@ def _guard_cameo_slava(state: Dict[str, Any], action: Dict[str, Any]) -> bool:
 def _effect_cameo_slava(state: Dict[str, Any], action: Dict[str, Any]) -> Dict[str, Any]:
     # Представляем упомянутую личность как персонажа мира
     eff = _ensure_effect_skeleton()
-    # Создаем нового NPC с уникальным id
-    npc_id = str(uuid.uuid4())[:8]
-    eff["introductions"]["npcs"].append({"id": npc_id, "name": "Славик КПСС", "mood": "neutral", "hp": 100, "items": []})
+    eff["introductions"]["npcs"].append({
+        "id": "npc_slava_kpss",
+        "name": "Славик КПСС",
+        "mood": "neutral",
+        "hp": 100,
+        "items": [],
+    })
     return eff
 
 def _narrative_cameo_slava(state: Dict[str, Any], action: Dict[str, Any], effects: Dict[str, Any]) -> Dict[str, Dict[str, str]]:
@@ -310,6 +330,106 @@ def _narrative_cameo_slava(state: Dict[str, Any], action: Dict[str, Any], effect
     raw = _fmt("{player} упоминает имя 'Слава КПСС'. Неожиданно выясняется, что в лаборатории есть сотрудник по прозвищу {npc}.", player=player_name, npc=npc_name)
     private = _fmt("Ты припоминаешь слухи о специалисте с прозвищем {npc}, и обнаруживаешь, что он действительно присутствует здесь.", npc=npc_name)
     general = _fmt("Дверь скрипит, и в комнату входит новый человек — {npc}, известный по прозвищу 'Слава КПСС'.", npc=npc_name)
+    return {"raw": {"text": raw}, "private": {"text": private}, "general": {"text": general}}
+
+
+# Storylet 6: Мем превращается в слух (rumor)
+def _guard_brand_rumor(state: Dict[str, Any], action: Dict[str, Any]) -> bool:
+    if action.get("intent") != "talk":
+        return False
+    t = _lc(action.get("text"))
+    return any(k in t for k in _BRAND_OR_MEME_CLUES)
+
+
+def _effect_brand_rumor(state: Dict[str, Any], action: Dict[str, Any]) -> Dict[str, Any]:
+    eff = _ensure_effect_skeleton()
+    raw_key = _extract_brand_term(action.get("text") or "") or "явление"
+    slug = _lc(raw_key).replace(" ", "_") or "brand"
+    eff["world_flags"][f"rumor_{slug}"] = "true"
+    eff["_storylet_context"] = {"key": raw_key}
+    return eff
+
+
+def _narrative_brand_rumor(state: Dict[str, Any], action: Dict[str, Any], effects: Dict[str, Any]) -> Dict[str, Dict[str, str]]:
+    key = (effects.get("_storylet_context") or {}).get("key", "явление")
+    player_name = action.get("player_name") or "Игрок"
+    raw = _fmt("{player} заводит разговор о «{term}».", player=player_name, term=key)
+    private = _fmt(
+        "Ты вспоминаешь местные слухи о «{term}», которые ходят среди здешних обитателей.",
+        term=key,
+    )
+    general = _fmt(
+        "В этих краях действительно поговаривают о «{term}» — эта тема вплетена в местные легенды.",
+        term=key,
+    )
+    return {"raw": {"text": raw}, "private": {"text": private}, "general": {"text": general}}
+
+
+# Storylet 7: Мем превращается в NPC-аналога (analog)
+def _brand_analog_target(action: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
+    t = _lc(action.get("text"))
+    if "ивангай" in t:
+        return "npc_ivangai", "Ивангай"
+    if "пац" in t:
+        return "npc_coolguy", "Чёткий Паца"
+    return None, None
+
+
+def _guard_brand_analog(state: Dict[str, Any], action: Dict[str, Any]) -> bool:
+    npc_id, _name = _brand_analog_target(action)
+    return bool(npc_id)
+
+
+def _effect_brand_analog(state: Dict[str, Any], action: Dict[str, Any]) -> Dict[str, Any]:
+    eff = _ensure_effect_skeleton()
+    npc_id, name = _brand_analog_target(action)
+    if not npc_id or not name:
+        eff["_storylet_context"] = {"key": "", "existing": False}
+        return eff
+
+    existing = None
+    for npc in state.get("npcs") or []:
+        if _lc(npc.get("id")) == _lc(npc_id) or _lc(npc.get("name")) == _lc(name):
+            existing = npc
+            break
+
+    eff["_storylet_context"] = {"key": name, "existing": bool(existing)}
+    if existing:
+        eff["world_flags"][f"legend_{npc_id}"] = "known"
+    else:
+        eff["introductions"]["npcs"].append({
+            "id": npc_id,
+            "name": name,
+            "mood": "нейтральный",
+            "hp": 100,
+            "items": [],
+        })
+    return eff
+
+
+def _narrative_brand_analog(state: Dict[str, Any], action: Dict[str, Any], effects: Dict[str, Any]) -> Dict[str, Dict[str, str]]:
+    term = (effects.get("_storylet_context") or {}).get("key", "")
+    player_name = action.get("player_name") or "Игрок"
+    existing = (effects.get("_storylet_context") or {}).get("existing", False)
+
+    if term == "Ивангай":
+        if existing:
+            raw = _fmt("{player} вновь упоминает легенду об известном хакере по прозвищу Ивангай.", player=player_name)
+        else:
+            raw = _fmt("{player} вспоминает легенду об известном хакере по прозвищу Ивангай.", player=player_name)
+        private = "Твоя отсылка к Ивангаю становится реалистичной деталью: появляется персонаж с таким прозвищем."
+        general = "В лаборатории упоминают некоего «Ивангая» — гениального хакера, о котором ходят легенды."
+    elif term == "Чёткий Паца":
+        if existing:
+            raw = _fmt("{player} напоминает историю про Чёткого Пацу, словно подтверждая его присутствие.", player=player_name)
+        else:
+            raw = _fmt("{player} поминает городскую легенду про Чёткого Пацу.", player=player_name)
+        private = "Ты вводишь в историю колоритного персонажа по кличке Чёткий Паца — теперь он часть мира."
+        general = "Среди местных бытует история о человеке, известном как Чёткий Паца, и теперь она всплыла вновь."
+    else:
+        raw = _fmt("{player} упоминает странное имя, пытаясь вплести его в повествование.", player=player_name)
+        private = "Твоя отсылка обретает форму внутри мира, не нарушая логики повествования."
+        general = "Неожиданное имя вплетается в рассказ, становясь частью местного фольклора."
     return {"raw": {"text": raw}, "private": {"text": private}, "general": {"text": general}}
 
 # =========================
@@ -431,6 +551,34 @@ def build_default_registry() -> StoryletRegistry:
     ))
 
     reg.register(Storylet(
+        storylet_id="brand.analog",
+        name="Бренд как персонаж",
+        description="Популярная отсылка становится NPC-легендой.",
+        strategy="analog",
+        triggers=[
+            Trigger(intents=[], keywords_any=["ивангай", "пац"], score=2),
+        ],
+        priority=30,
+        guard=_guard_brand_analog,
+        effect_builder=_effect_brand_analog,
+        narrative_builder=_narrative_brand_analog
+    ))
+
+    reg.register(Storylet(
+        storylet_id="brand.rumor",
+        name="Бренд как слух",
+        description="Мем обсуждают как местную легенду.",
+        strategy="rumor",
+        triggers=[
+            Trigger(intents=["talk"], must_have_tag="brand", score=1),
+        ],
+        priority=25,
+        guard=_guard_brand_rumor,
+        effect_builder=_effect_brand_rumor,
+        narrative_builder=_narrative_brand_rumor
+    ))
+
+    reg.register(Storylet(
         storylet_id="brand.yes_and",
         name="Да-и: бренд/мем",
         description="Любая брендо- или мемо-отсылка становится культурным артефактом мира.",
@@ -452,7 +600,7 @@ def build_default_registry() -> StoryletRegistry:
         triggers=[
             Trigger(intents=[], keywords_any=["слава кпсс", "slava kpss"], score=2),
         ],
-        priority=10,
+        priority=15,
         guard=_guard_cameo_slava,
         effect_builder=_effect_cameo_slava,
         narrative_builder=_narrative_cameo_slava

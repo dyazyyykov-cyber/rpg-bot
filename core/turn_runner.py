@@ -10,9 +10,10 @@ from typing import Any, Dict, List, Callable, Optional, Awaitable
 
 from .utils import ensure_dir
 from . import storylets
-from .engine import run_turn_with_llm, apply_effects, push_raw_story, push_private_story, push_general_story
+from .engine import run_turn_with_llm, push_raw_story, push_private_story, push_general_story
 from .schemas import TurnConfig, TurnOutputs, EffectsDelta, RawStory, PlayerStory, GeneralStory
 from .fact_bank import FactBank
+from . import assimilator
 
 logger = logging.getLogger(__name__)
 logger.propagate = True
@@ -139,22 +140,30 @@ async def run_single_turn(
             result = None
             logger.warning("Turn[%s]: storylet resolution exception: %r", sid, e)
         if result and result.get("confidence", 0) >= 0.6:
-            eff = result["effects"]
+            eff = json.loads(json.dumps(result["effects"], ensure_ascii=False))
             # Очистка эффектов от служебных полей и корректировка схемы
             for pd in eff.get("players", []) or []:
-                if "flags" in pd:
-                    flags = pd.pop("flags")
-                    if "status" in flags:
-                        pd["status_apply"] = {"status": flags["status"]}
+                flags = pd.pop("flags", None)
+                if isinstance(flags, dict) and "status" in flags:
+                    pd["status_apply"] = {"status": flags["status"]}
             for nd in eff.get("npcs", []) or []:
-                if "flags" in nd:
-                    flags = nd.pop("flags")
-                    # status flags for NPCs are ignored (no schema field)
+                nd.pop("flags", None)
             for item in (eff.get("introductions") or {}).get("items", []):
                 if isinstance(item, dict):
                     item.pop("meta", None)
-            # Применяем эффекты к состоянию
-            apply_effects(state, eff)
+
+            # Применяем эффекты через ассимилятор, чтобы учесть introductions
+            eff_for_assim = json.loads(json.dumps(eff, ensure_ascii=False))
+            for pd in eff_for_assim.get("players", []) or []:
+                if "status_apply" in pd:
+                    pd["status_merge"] = pd.pop("status_apply")
+            if not isinstance(state.get("effects_log"), list):
+                state["effects_log"] = []
+            try:
+                assimilator.apply_effects(state, eff_for_assim)
+            except Exception as exc:
+                logger.exception("Turn[%s]: assimilator.apply_effects failed: %r", sid, exc)
+                raise
             old_turn = int(state.get("turn", 0))
             state["turn"] = old_turn + 1
             new_turn = state["turn"]
