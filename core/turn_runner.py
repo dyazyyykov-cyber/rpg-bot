@@ -9,19 +9,13 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Callable, Optional, Awaitable
 
 from .utils import ensure_dir
-from .engine import run_turn_with_llm
-from .schemas import (
-    TurnConfig,
-    TurnOutputs,
-    EffectsDelta,
-    RawStory,
-    PlayerStory,
-    GeneralStory,
-)
+from . import storylets
+from .engine import run_turn_with_llm, apply_effects, push_raw_story, push_private_story, push_general_story
+from .schemas import TurnConfig, TurnOutputs, EffectsDelta, RawStory, PlayerStory, GeneralStory
+from .fact_bank import FactBank
 
 logger = logging.getLogger(__name__)
 logger.propagate = True
-
 
 # --------- Внешние типы для взаимодействия (воркер/БД/бот) ---------
 
@@ -31,7 +25,6 @@ class PlayerAction:
     player_tg: int             # TG user id
     player_name: str           # видимое имя
     text: str                  # текст действия как есть
-
 
 @dataclass
 class TurnIOCallbacks:
@@ -59,7 +52,6 @@ class TurnIOCallbacks:
     # опционально: телеметрия
     telemetry: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None
 
-
 # -------------------- Утилиты логирования --------------------
 
 def _write_json(path: str, obj: Any) -> None:
@@ -72,14 +64,12 @@ def _write_json(path: str, obj: Any) -> None:
     except Exception:
         pass
 
-
 def _write_text(path: str, text: str) -> None:
     try:
         with open(path, "w", encoding="utf-8") as f:
             f.write(text)
     except Exception:
         pass
-
 
 # -------------------- Основной раннер одного хода --------------------
 
@@ -131,26 +121,125 @@ async def run_single_turn(
                 await callbacks.notify_generation_started(len(actions), expect_actions)
             except TypeError:
                 await callbacks.notify_generation_started()
-        _write_text(os.path.join(turn_dir, "generation_started.txt"),
-                    f"started; actions={len(actions)}")
+            _write_text(os.path.join(turn_dir, "generation_started.txt"),
+                        f"started; actions={len(actions)}")
     except Exception:
         logger.exception("Turn[%s]: notify_generation_started failed", sid)
 
+    # --- детерминированная обработка через Storylets, если применимо
+    if len(actions) == 1:
+        try:
+            result = storylets.propose_storylet_resolution(state, {
+                "player_id": actions[0].player_id,
+                "player_tg": actions[0].player_tg,
+                "player_name": actions[0].player_name,
+                "text": actions[0].text
+            })
+        except Exception as e:
+            result = None
+            logger.warning("Turn[%s]: storylet resolution exception: %r", sid, e)
+        if result and result.get("confidence", 0) >= 0.6:
+            eff = result["effects"]
+            # Очистка эффектов от служебных полей и корректировка схемы
+            for pd in eff.get("players", []) or []:
+                if "flags" in pd:
+                    flags = pd.pop("flags")
+                    if "status" in flags:
+                        pd["status_apply"] = {"status": flags["status"]}
+            for nd in eff.get("npcs", []) or []:
+                if "flags" in nd:
+                    flags = nd.pop("flags")
+                    # status flags for NPCs are ignored (no schema field)
+            for item in (eff.get("introductions") or {}).get("items", []):
+                if isinstance(item, dict):
+                    item.pop("meta", None)
+            # Применяем эффекты к состоянию
+            apply_effects(state, eff)
+            old_turn = int(state.get("turn", 0))
+            state["turn"] = old_turn + 1
+            new_turn = state["turn"]
+            # Формируем тексты результата
+            raw_text = result["raw"].get("text", "")
+            private_text = result["private"].get("text", "")
+            general_text = result["general"].get("text", "")
+            player_id = str(actions[0].player_id or "")
+            echo_text = actions[0].text or ""
+            push_raw_story(state, {"text": raw_text})
+            push_private_story(state, player_id, {"text": private_text, "echo_of_action": echo_text})
+            push_general_story(state, {"text": general_text})
+            # Обновляем FactBank фактами эффекта
+            fb = FactBank.from_state(state)
+            fb.apply_effects(eff, new_turn, source="storylet")
+            state["fact_bank"] = fb.export()
+            # Логирование и рассылка
+            try:
+                effects_obj = EffectsDelta.model_validate(eff)
+            except Exception as e:
+                logger.error("Turn[%s]: EffectsDelta validation failed for storylet effects: %s", sid, e)
+                effects_obj = eff  # use dict if validation fails
+            try:
+                await callbacks.notify_effects(effects_obj)  # type: ignore[arg-type]
+            except Exception as e:
+                logger.exception("Turn[%s]: notify_effects failed: %r", sid, e)
+            try:
+                raw_obj = RawStory.model_validate({"text": raw_text})
+            except Exception:
+                raw_obj = RawStory(text=raw_text)
+            try:
+                await callbacks.notify_raw_story(raw_obj)  # type: ignore[arg-type]
+            except Exception as e:
+                logger.exception("Turn[%s]: notify_raw_story failed: %r", sid, e)
+            private_obj = PlayerStory(text=private_text or " ", highlights=None, echo_of_action=echo_text or " ")
+            try:
+                await callbacks.notify_private_story(player_id, private_obj)  # type: ignore[arg-type]
+            except Exception as e:
+                logger.exception("Turn[%s]: notify_private_story(%s) failed: %r", sid, player_id, e)
+            general_obj = GeneralStory(text=general_text or " ", highlights=None)
+            try:
+                if not (general_obj.text or "").strip():
+                    logger.error("Turn[%s]: GENERAL empty text in storylet result -> abort turn", sid)
+                    raise RuntimeError("General story text is empty")
+                await callbacks.notify_general_story(general_obj)  # type: ignore[arg-type]
+            except Exception as e:
+                logger.exception("Turn[%s]: notify_general_story failed: %r", sid, e)
+                raise
+            await callbacks.save_state(state)
+            logger.info("Turn[%s #%d]: state saved (turn now %s)", sid, old_turn, state.get("turn"))
+            if callbacks.telemetry:
+                try:
+                    await callbacks.telemetry({
+                        "session_id": session_id,
+                        "turn": state.get("turn"),
+                        "llm_time_sec": 0.0,
+                        "actions_cnt": len(actions),
+                        "private_cnt": 1,
+                        "general_present": True,
+                    })
+                except Exception:
+                    logger.exception("Turn[%s]: telemetry failed", sid)
+            outputs = TurnOutputs(
+                effects=effects_obj if isinstance(effects_obj, EffectsDelta) else EffectsDelta.model_validate(eff),
+                raw=raw_obj if isinstance(raw_obj, RawStory) else RawStory.model_validate({"text": raw_text}),
+                general=general_obj,
+                players_private={player_id: private_obj},
+                verified_facts=[],
+                general_outline=None,
+                coverage=None,
+                turn=new_turn,
+                telemetry={}
+            )
+            return outputs
+
     # --- запускаем оркестровку хода (LLM)
-    actions_payload = [
-        {
+    t0 = time.time()
+    outputs: TurnOutputs = await run_turn_with_llm(
+        state=state,
+        actions=[{
             "player_id": a.player_id,
             "player_tg": a.player_tg,
             "player_name": a.player_name,
             "text": a.text,
-        }
-        for a in actions
-    ]
-
-    t0 = time.time()
-    outputs: TurnOutputs = await run_turn_with_llm(
-        state=state,
-        actions=actions_payload,
+        } for a in actions],
         cfg=cfg,
     )
     dt = time.time() - t0
@@ -234,7 +323,6 @@ async def run_single_turn(
             logger.exception("Turn[%s]: telemetry failed", sid)
 
     return outputs
-
 
 # -------------------- Цикл с таймером ожидания --------------------
 
