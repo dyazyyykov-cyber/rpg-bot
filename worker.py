@@ -30,13 +30,11 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 logger.propagate = True
 
-
 # -------------------- Конфиг по умолчанию --------------------
 DEFAULT_TURN_CFG = TurnConfig(
     timeout=60.0,   # время ожидания хода
     seed=None,      # фиксированный сид генерации (для отладки) или None
 )
-
 
 # -------------------- Redis-ключи и утилиты --------------------
 
@@ -48,7 +46,6 @@ def _redis_session_active_key() -> str:
 
 def _redis_session_control_key(session_id: int) -> str:
     return f"session:{session_id}:control"  # каналы управления (например, cancel)
-
 
 # -------------------- Приём действий игроков --------------------
 
@@ -128,7 +125,6 @@ async def _await_actions_for_session(
     )
     return result
 
-
 # -------------------- Взаимодействие с БД --------------------
 
 async def _load_state(session_id: int) -> Dict[str, Any]:
@@ -136,7 +132,6 @@ async def _load_state(session_id: int) -> Dict[str, Any]:
 
 async def _save_state(session_id: int, state: Dict[str, Any]) -> None:
     await save_session_state(session_id, state)
-
 
 # -------------------- Паблиш в Telegram (через бота) --------------------
 
@@ -179,10 +174,8 @@ async def _notify_general(session_id: int, story_obj: Any) -> None:
     text = story_obj.text if hasattr(story_obj, "text") else str(story_obj)
     logger.info("Turn[%s]: general | text(%d): %s", session_id, len(text), (text[:155] + "...") if len(text) > 155 else text)
 
-
 async def _notify_telemetry(session_id: int, data: Dict[str, Any]) -> None:
     logger.info("Turn[%s]: telemetry json(%d): %s", session_id, len(json.dumps(data, ensure_ascii=False)), json.dumps(data, ensure_ascii=False))
-
 
 # -------------------- Коллбеки для раннера --------------------
 
@@ -191,14 +184,13 @@ def make_callbacks_for_session(session_id: int) -> TurnIOCallbacks:
         load_state=lambda: _load_state(session_id),
         save_state=lambda st: _save_state(session_id, st),
         await_actions=lambda exp, timeout, poll: _await_actions_for_session(session_id, exp, timeout, poll),
-        notify_generation_started=lambda *args, **kwargs: _notify_generation_started(session_id, *args, **kwargs),
+        notify_generation_started=lambda actual=0, expected=0: _notify_generation_started(session_id, actual, expected),
         notify_effects=lambda eff: _notify_effects(session_id, eff),
         notify_raw_story=lambda raw: _notify_raw(session_id, raw),
         notify_private_story=lambda pid, st: _notify_private(session_id, pid, st),
         notify_general_story=lambda st: _notify_general(session_id, st),
         telemetry=lambda data: _notify_telemetry(session_id, data),
     )
-
 
 # -------------------- Управляющая логика воркера --------------------
 
@@ -230,7 +222,6 @@ async def _start_turn_loop_for_session(session_id: int, cfg: TurnConfig = DEFAUL
         )
     except asyncio.CancelledError:
         pass
-
 
 async def _monitor_active_sessions() -> None:
     """
@@ -280,7 +271,6 @@ async def _monitor_active_sessions() -> None:
         except Exception:
             logger.exception("Worker: monitor loop failed; sleep")
             await asyncio.sleep(2.0)
-
 
 # -------------------- main --------------------
 
