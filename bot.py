@@ -62,7 +62,7 @@ LOGS_DIR = get_env("LOGS_DIR", "./logs")
 LOG_LEVEL = get_env("LOG_LEVEL", "INFO")
 logging.basicConfig(
     level=getattr(logging, str(LOG_LEVEL).upper(), logging.INFO),
-    format="%(levelname)s:%(name)s:%(message)s",
+    format="%(levelname)s:%(name)s:%message)s",
 )
 logger = logging.getLogger(__name__)
 
@@ -162,132 +162,13 @@ async def _save_lobby_panel(session_id: str, message_id: int) -> None:
     await redis.set(_lobby_panel_key(session_id), message_id, ex=7 * 24 * 3600)
 
 async def _get_lobby_panel(session_id: str) -> Optional[int]:
-    mid = await redis.get(_lobby_panel_key(session_id))
-    return int(mid) if mid else None
-
-async def _post_or_update_lobby_panel(chat_id: int, session_id: str) -> Message:
-    text = await _lobby_text(session_id)
-    panel_id = await _get_lobby_panel(session_id)
-    if panel_id:
-        try:
-            return await bot.edit_message_text(
-                chat_id=chat_id, message_id=panel_id, text=text, reply_markup=_lobby_kb(session_id)
-            )
-        except TelegramBadRequest:
-            pass
-    msg = await bot.send_message(chat_id, text, reply_markup=_lobby_kb(session_id))
-    await _save_lobby_panel(session_id, msg.message_id)
-    return msg
-
-async def _send_chunked(chat_id: int, text: str) -> None:
-    """Безопасная отправка длинных сообщений (4096-лимит Telegram)."""
-    for part in chunk_text(text, hard_limit=4000):
-        await bot.send_message(chat_id, part)
-
-# ---------------- Commands ----------------
-
-async def _register_commands() -> None:
+    val = await redis.get(_lobby_panel_key(session_id))
+    if val is None:
+        return None
     try:
-        await bot.set_my_commands(
-            [
-                BotCommand(command="newgame", description="Создать/сбросить сессию"),
-                BotCommand(command="endgame", description="Завершить сессию"),
-                BotCommand(command="startworld", description="Открыть лобби/запустить мир"),
-                BotCommand(command="join", description="Присоединиться к лобби"),
-                BotCommand(command="act", description="Личный ход (в ЛС)"),
-            ]
-        )
+        return int(val)
     except Exception:
-        logger.exception("set_my_commands failed")
-
-async def _maybe_await(v):
-    return await v if inspect.isawaitable(v) else v
-
-async def _send_or_edit_status(*, chat_id: int, status_msg: Optional[Message], text: str) -> Message:
-    text = escape(text)
-    if status_msg:
-        try:
-            m = await bot.edit_message_text(chat_id=chat_id, message_id=status_msg.message_id, text=text)
-            logger.info("STATUS: edit -> %s", text)
-            return m
-        except TelegramBadRequest:
-            logger.debug("STATUS: edit failed, will resend")
-    m = await bot.send_message(chat_id, text)
-    logger.info("STATUS: send -> %s", text)
-    return m
-
-async def _delete_status_silent(msg: Optional[Message]) -> None:
-    if not msg:
-        return
-    try:
-        await bot.delete_message(msg.chat.id, msg.message_id)
-        logger.info("STATUS: deleted")
-    except TelegramBadRequest:
-        logger.debug("STATUS: already gone")
-
-async def _ensure_player(*, tg_id: int, name: str) -> Player:
-    async with AsyncSessionLocal() as dbs:
-        p: Player | None = (
-            await dbs.execute(select(Player).where(Player.tg_id == tg_id))
-        ).scalar_one_or_none()
-        if p is None:
-            p = Player(tg_id=tg_id, name=name)
-            dbs.add(p)
-            await dbs.commit()
-            await dbs.refresh(p)
-            logger.info("PLAYER: created tg=%s name=%s", tg_id, name)
-        return p
-
-async def _join_session(*, session_id: str, tg_id: int, name: str) -> bool:
-    player = await _ensure_player(tg_id=tg_id, name=name)
-    async with AsyncSessionLocal() as dbs:
-        sp: SessionPlayer | None = (
-            await dbs.execute(
-                select(SessionPlayer).where(
-                    SessionPlayer.session_id == session_id, SessionPlayer.player_id == str(player.id)
-                )
-            )
-        ).scalar_one_or_none()
-        if sp:
-            return False
-        dbs.add(SessionPlayer(session_id=session_id, player_id=str(player.id), role=""))
-        s: Session | None = (await dbs.execute(select(Session).where(Session.id == session_id))).scalar_one_or_none()
-        if s:
-            st = dict(s.state or {})
-            players = list(st.get("players") or [])
-            if not any(str(p.get("player_id")) == str(player.id) for p in players if isinstance(p, dict)):
-                players.append({"player_id": str(player.id), "name": player.name or str(player.tg_id), "role": "", "role_summary": ""})
-                st["players"] = players
-                await dbs.execute(update(Session).where(Session.id == session_id).values(state=st))
-        await dbs.commit()
-    logger.info("JOIN: session=%s user=%s (%s)", session_id, tg_id, name)
-    return True
-
-async def _find_active_session_for_user(tg_id: int) -> Optional[str]:
-    async with AsyncSessionLocal() as dbs:
-        p: Player | None = (
-            await dbs.execute(select(Player).where(Player.tg_id == tg_id))
-        ).scalar_one_or_none()
-        if not p:
-            return None
-        rows = await dbs.execute(
-            select(Session)
-            .join(SessionPlayer, SessionPlayer.session_id == Session.id)
-            .where(SessionPlayer.player_id == str(p.id))
-        )
-        sessions: List[Session] = list(rows.scalars().all())
-
-    for s in sessions:
-        st = dict(s.state or {})
-        ph = (st.get("phase") or "").lower()
-        if ph == "running":
-            return str(s.id)
-    for s in sessions:
-        st = dict(s.state or {})
-        ph = (st.get("phase") or "").lower()
-        if ph != "ended":
-            return str(s.id)
-    return None
+        return None
 
 # ---------------- Start world flow ----------------
 
@@ -307,15 +188,13 @@ async def _start_world_flow(*, session_id: str, group_chat_id: int, reply_target
 
     players_payload = [{"player_id": pid, "name": name} for (pid, _tg, name) in joined]
 
-    world_state: Dict[str, Any] = await _maybe_await(
-        generate_world_v2(
-            group_chat_id=group_chat_id,
-            title=title,
-            players=players_payload,
-            story_theme=story_theme,
-            timeout=None,
-        )
-    )
+    world_state: Dict[str, Any] = await (generate_world_v2(
+        group_chat_id=group_chat_id,
+        title=title,
+        players=players_payload,
+        story_theme=story_theme,
+        timeout=None,
+    ) if inspect.isawaitable(generate_world_v2) else generate_world_v2)
     if story_theme and not world_state.get("story_theme"):
         world_state["story_theme"] = story_theme
 
@@ -326,14 +205,12 @@ async def _start_world_flow(*, session_id: str, group_chat_id: int, reply_target
 
     status_msg = await _send_or_edit_status(chat_id=group_chat_id, status_msg=status_msg, text="Распределяю роли…")
 
-    roles = await _maybe_await(
-        generate_roles_for_players(
-            state=world_state,
-            players=players_payload,
-            story_theme=story_theme,
-            timeout=None,
-        )
-    )
+    roles = await (generate_roles_for_players(
+        state=world_state,
+        players=players_payload,
+        story_theme=story_theme,
+        timeout=None,
+    ) if inspect.isawaitable(generate_roles_for_players) else generate_roles_for_players)
     roles_by_pid: Dict[str, Dict[str, str]] = {r["player_id"]: r for r in roles}
 
     async with AsyncSessionLocal() as dbs:
@@ -358,8 +235,8 @@ async def _start_world_flow(*, session_id: str, group_chat_id: int, reply_target
             if r:
                 await dbs.execute(
                     update(SessionPlayer)
-                    .where(SessionPlayer.session_id == session_id, SessionPlayer.player_id == pid)
-                    .values(role=r.get("role") or "")
+                        .where(SessionPlayer.session_id == session_id, SessionPlayer.player_id == pid)
+                        .values(role=r.get("role") or "")
                 )
         await dbs.commit()
     logger.info("STARTWORLD: roles assigned")
@@ -369,14 +246,12 @@ async def _start_world_flow(*, session_id: str, group_chat_id: int, reply_target
     sent_dm = 0
     for pid, tg, name in joined:
         pl_dict = {"player_id": pid, "name": name}
-        story = await _maybe_await(
-            generate_initial_backstory(
-                state=world_state,
-                player=pl_dict,
-                story_theme=story_theme,
-                timeout=None,
-            )
-        )
+        story = await (generate_initial_backstory(
+            state=world_state,
+            player=pl_dict,
+            story_theme=story_theme,
+            timeout=None,
+        ) if inspect.isawaitable(generate_initial_backstory) else generate_initial_backstory)
         role_line = roles_by_pid.get(pid, {}).get("role") or ""
         dm_text = f"<b>Ваша роль:</b> {escape(role_line)}\n<b>Пролог</b>\n{escape(story.get('text') or '')}"
         try:
@@ -417,17 +292,112 @@ async def _start_world_flow(*, session_id: str, group_chat_id: int, reply_target
     players_block = "\n".join([f"• {escape(name)} — {escape(roles_by_pid.get(pid, {}).get('role') or '')}" for pid, _tg, name in joined])
     setting = escape(world_state.get("setting") or "")
     location = escape(world_state.get("location") or "")
-    theme_line = escape(world_state.get("story_theme") or "" ) if world_state.get("story_theme") else "не задана"
+    theme_line = escape(world_state.get("story_theme") or "") if world_state.get("story_theme") else "не задана"
+    opening_hook = escape(world_state.get("opening_hook") or "")
 
     final_text = (
         f"<b>Сеттинг:</b> {setting}\n"
         f"<b>Стартовая локация:</b> {location}\n"
-        f"<b>Тема:</b> {theme_line}\n\n"
-        f"Роли и персональные прологи разосланы в личные сообщения ({sent_dm}/{len(joined)}).\n\n"
+        f"<b>Тема:</b> {theme_line}" +
+        (f"\n<b>Начальная ситуация:</b> {opening_hook}" if opening_hook else "") +
+        f"\n\nРоли и персональные прологи разосланы в личные сообщения ({sent_dm}/{len(joined)}).\n\n"
         f"<b>Участники:</b>\n{players_block}"
     )
     await _send_chunked(group_chat_id, final_text)
     logger.info("STARTWORLD: final world post sent")
+
+    # Подсказка игрокам о начале игры
+    try:
+        await bot.send_message(group_chat_id, "Игра началась! Теперь отправляйте свои действия командой /act мне в личные сообщения.")
+    except Exception as e:
+        logger.warning("Failed to send start reminder: %r", e)
+
+# ---- THEME in group flow ----
+
+def _await_theme_key(chat_id: int, user_id: int) -> str:
+    return f"await_theme:{chat_id}:{user_id}"
+
+@router.callback_query(F.data.startswith("settheme:"))
+async def cb_settheme(call: CallbackQuery):
+    """Ждём СЛЕДУЮЩЕЕ сообщение от нажавшего пользователя и используем его как тему.
+    Важно: НЕ перерисовываем лобби здесь, чтобы не плодить дубликаты.
+    """
+    session_id = call.data.split(":", 1)[1]
+    await redis.setex(_await_theme_key(call.message.chat.id, call.from_user.id), 600, session_id)
+    help_text = (
+        "Напишите тему одним сообщением (например: <i>больной боб</i> или <i>случай в Санкт-Петербурге</i>).\n"
+        "Будет учтена тема от нажавшего кнопку игрока. (Тема опциональна.)"
+    )
+    try:
+        await call.message.reply(help_text)
+        await call.answer("Жду тему здесь, в чате")
+    except Exception:
+        pass
+    logger.info("SETTHEME: sid=%s user=%s chat=%s", session_id, call.from_user.id, call.message.chat.id)
+
+@router.callback_query(F.data.startswith("cleartheme:"))
+async def cb_cleartheme(call: CallbackQuery):
+    session_id = call.data.split(":", 1)[1]
+    await _clear_theme(session_id)
+    try:
+        await call.answer("Тема сброшена")
+    except Exception:
+        pass
+    try:
+        await _post_or_update_lobby_panel(call.message.chat.id, session_id)
+    except Exception:
+        pass
+    logger.info("CLEARTHEME: sid=%s", session_id)
+
+# ---- Group message handler to capture theme text ----
+# ВАЖНО: ограничиваем ТОЛЬКО групповыми чатами, иначе этот хендлер съедает приватные апдейты и /act не доходит.
+@router.message(F.chat.type.in_({"group", "supergroup"}), ~F.text.startswith("/"))
+async def on_group_message(message: Message):
+    text = (message.text or "").strip()
+    if not text:
+        return
+    pending_sid = await redis.get(_await_theme_key(message.chat.id, message.from_user.id))
+    if not pending_sid:
+        return
+    session_id = pending_sid.decode("utf-8")
+    await _set_theme(session_id, text)
+    await redis.delete(_await_theme_key(message.chat.id, message.from_user.id))
+    await message.reply(f"Тема установлена: <b>{escape(text)}</b>")
+    try:
+        await _post_or_update_lobby_panel(message.chat.id, session_id)
+    except Exception:
+        pass
+    logger.info("THEME SET: sid=%s by user=%s theme=%s", session_id, message.from_user.id, text)
+
+# ---------------- DM: /act ----------------
+
+@router.message(Command("act"))
+async def cmd_act(message: Message):
+    if message.chat.type != "private":
+        await message.answer("Эту команду нужно отправлять в личку боту.")
+        return
+
+    raw = message.text or ""
+    parts = raw.split(maxsplit=1)
+    act_text = parts[1].strip() if len(parts) > 1 else ""
+    if not act_text:
+        await message.answer("Пустой ход. Напишите текст после /act.")
+        return
+
+    session_id = await _find_active_session_for_user(message.from_user.id)
+    if not session_id:
+        await message.answer("Нет активной сессии. Зайдите в группу, присоединитесь и дождитесь запуска игры.")
+        logger.info("ACT: no active session for tg=%s", message.from_user.id)
+        return
+
+    payload = {"player_tg": message.from_user.id, "player_name": message.from_user.full_name, "text": act_text}
+    try:
+        await redis.rpush(f"session:{session_id}:actions", json.dumps(payload, ensure_ascii=False))
+        logger.info("ACT: accepted for sid=%s tg=%s text=%s", session_id, message.from_user.id, act_text)
+        await message.answer("Принято.")
+    except Exception as e:
+        logger.warning("ACT: redis push failed sid=%s err=%r", session_id, e)
+        await message.answer("Не удалось отправить ход, попробуйте ещё раз.")
 
 # ---------------- Commands ----------------
 
@@ -559,92 +529,24 @@ async def cb_startworld(call: CallbackQuery):
         pass
     await _start_world_flow(session_id=session_id, group_chat_id=call.message.chat.id, reply_target=call)
 
-# ---- THEME in group flow ----
+# ---------------- Справка/Правила ----------------
 
-def _await_theme_key(chat_id: int, user_id: int) -> str:
-    return f"await_theme:{chat_id}:{user_id}"
-
-@router.callback_query(F.data.startswith("settheme:"))
-async def cb_settheme(call: CallbackQuery):
-    """Ждём СЛЕДУЮЩЕЕ сообщение от нажавшего пользователя и используем его как тему.
-    Важно: НЕ перерисовываем лобби здесь, чтобы не плодить дубликаты.
-    """
-    session_id = call.data.split(":", 1)[1]
-    await redis.setex(_await_theme_key(call.message.chat.id, call.from_user.id), 600, session_id)
+@router.message(Command("rules"))
+async def cmd_rules(message: Message):
     help_text = (
-        "Напишите тему одним сообщением (например: <i>больной боб</i> или <i>случай в Санкт-Петербурге</i>).\n"
-        "Будет учтена тема от нажавшего кнопку игрока. (Тема опциональна.)"
+        "📜 <b>Правила игры и управление:</b>\n"
+        "• После начала игры отправляйте свои действия ботu <b>в личные сообщения</b> командой <code>/act</code> и описанием действия. Например: <code>/act осматриваюсь вокруг</code>.\n"
+        "• Ваши действия обрабатываются и влияют на общую историю, разворачивающуюся в групповом чате. Вы будете получать личное описание последствий своих действий, а в группу бот публикует общее продолжение истории.\n"
+        "• Команда /newgame в группе создаёт новую сессию игры, /join — присоединяет к лобби, и по нажатию «Начать игру» запускается сюжет.\n"
+        "• Тему игры можно задать через кнопку «📝 Задать тему» перед стартом игры.\n"
+        "• Игра является текстовой RPG с нарративом, старайтесь описывать действия персонажа понятно и по ситуации. Успех и неудача действий определяются системой (частично случайно, частично по логике)."
     )
-    try:
-        await call.message.reply(help_text)
-        await call.answer("Жду тему здесь, в чате")
-    except Exception:
-        pass
-    logger.info("SETTHEME: sid=%s user=%s chat=%s", session_id, call.from_user.id, call.message.chat.id)
+    await message.answer(help_text)
 
-@router.callback_query(F.data.startswith("cleartheme:"))
-async def cb_cleartheme(call: CallbackQuery):
-    session_id = call.data.split(":", 1)[1]
-    await _clear_theme(session_id)
-    try:
-        await call.answer("Тема сброшена")
-    except Exception:
-        pass
-    try:
-        await _post_or_update_lobby_panel(call.message.chat.id, session_id)
-    except Exception:
-        pass
-    logger.info("CLEARTHEME: sid=%s", session_id)
-
-# ---- Group message handler to capture theme text ----
-# ВАЖНО: ограничиваем ТОЛЬКО групповыми чатами, иначе этот хендлер съедает приватные апдейты и /act не доходит.
-@router.message(F.chat.type.in_({"group", "supergroup"}), ~F.text.startswith("/"))
-async def on_group_message(message: Message):
-    text = (message.text or "").strip()
-    if not text:
-        return
-    pending_sid = await redis.get(_await_theme_key(message.chat.id, message.from_user.id))
-    if not pending_sid:
-        return
-    session_id = pending_sid.decode("utf-8")
-    await _set_theme(session_id, text)
-    await redis.delete(_await_theme_key(message.chat.id, message.from_user.id))
-    await message.reply(f"Тема установлена: <b>{escape(text)}</b>")
-    try:
-        await _post_or_update_lobby_panel(message.chat.id, session_id)
-    except Exception:
-        pass
-    logger.info("THEME SET: sid=%s by user=%s theme=%s", session_id, message.from_user.id, text)
-
-# ---------------- DM: /act ----------------
-
-@router.message(Command("act"))
-async def cmd_act(message: Message):
-    if message.chat.type != "private":
-        await message.answer("Эту команду нужно отправлять в личку боту.")
-        return
-
-    raw = message.text or ""
-    parts = raw.split(maxsplit=1)
-    act_text = parts[1].strip() if len(parts) > 1 else ""
-    if not act_text:
-        await message.answer("Пустой ход. Напишите текст после /act.")
-        return
-
-    session_id = await _find_active_session_for_user(message.from_user.id)
-    if not session_id:
-        await message.answer("Нет активной сессии. Зайдите в группу, присоединитесь и дождитесь запуска игры.")
-        logger.info("ACT: no active session for tg=%s", message.from_user.id)
-        return
-
-    payload = {"player_tg": message.from_user.id, "player_name": message.from_user.full_name, "text": act_text}
-    try:
-        await redis.rpush(f"actions:{session_id}", json.dumps(payload, ensure_ascii=False))
-        logger.info("ACT: accepted for sid=%s tg=%s text=%s", session_id, message.from_user.id, act_text)
-        await message.answer("Принято.")
-    except Exception as e:
-        logger.warning("ACT: redis push failed sid=%s err=%r", session_id, e)
-        await message.answer("Не удалось отправить ход, попробуйте ещё раз.")
+@router.message(Command("help"))
+async def cmd_help(message: Message):
+    # Alias to /rules
+    await cmd_rules(message)
 
 # ---------------- Entry ----------------
 
