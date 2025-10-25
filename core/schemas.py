@@ -1,6 +1,4 @@
-# core/schemas.py
 from __future__ import annotations
-
 from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field, ConfigDict, AliasChoices
 
@@ -13,7 +11,6 @@ from pydantic import BaseModel, Field, ConfigDict, AliasChoices
 #  - Новые сущности: StoryTheme, VerifiedFact, Outline.
 # =============================================================
 
-
 # ------------------------- БАЗОВЫЕ ТИПЫ -------------------------
 
 class ItemEntry(BaseModel):
@@ -22,14 +19,12 @@ class ItemEntry(BaseModel):
     name: str = Field(..., min_length=1, max_length=80)
     source: str = Field("scene", min_length=1, max_length=32, description="scene | npc_id | player_id")
 
-
 class SoftStats(BaseModel):
     model_config = ConfigDict(extra="forbid")
     харизма: int = Field(0, ge=0, le=5)
     внимательность: int = Field(0, ge=0, le=5)
     удача: int = Field(0, ge=0, le=5)
     авторитет: int = Field(0, ge=0, le=5)
-
 
 class RoleEntry(BaseModel):
     """Каталог ролей (исторически). Оставлен для совместимости."""
@@ -39,7 +34,6 @@ class RoleEntry(BaseModel):
     base_hp: int = Field(120, ge=60, le=300)
     soft_stats: Optional[SoftStats] = None
 
-
 class NpcEntry(BaseModel):
     model_config = ConfigDict(extra="forbid")
     id: str = Field(..., min_length=1, max_length=64)
@@ -47,7 +41,6 @@ class NpcEntry(BaseModel):
     mood: str = Field("neutral", min_length=1, max_length=24)
     hp: int = Field(100, ge=0, le=1000)
     items: List[str] = Field(default_factory=list, min_items=0, max_items=12)
-
 
 class PlayerState(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -60,7 +53,6 @@ class PlayerState(BaseModel):
     items: List[str] = Field(default_factory=list, min_items=0, max_items=20)
     position: str = Field("scene", min_length=1, max_length=32)
 
-
 # ------------------------- СТАРТОВЫЙ МИР ------------------------
 
 class VisibilityDefaults(BaseModel):
@@ -68,13 +60,11 @@ class VisibilityDefaults(BaseModel):
     perception_dc: int = Field(12, ge=1, le=30)
     public_on_panic: bool = True
 
-
 class StyleSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
     tone: str = Field("mystery", min_length=1, max_length=40)
     pacing: str = Field("medium", min_length=1, max_length=40, validation_alias=AliasChoices("pacing", "pace"),
                         serialization_alias="pacing")
-
 
 class StoryTheme(BaseModel):
     """Опциональная тема/жанр партии из лобби."""
@@ -82,7 +72,6 @@ class StoryTheme(BaseModel):
     title: Optional[str] = Field(default=None, max_length=120)
     genre: Optional[str] = Field(default=None, max_length=48)
     tone: Optional[str] = Field(default=None, max_length=32)
-
 
 class InitialWorld(BaseModel):
     """Старый контракт старта мира (оставлен для обратной совместимости)."""
@@ -100,7 +89,6 @@ class InitialWorld(BaseModel):
     style: Optional[StyleSpec] = None
     opening_hook: str = Field(..., min_length=10, max_length=500)
 
-
 class InitialWorldV2(BaseModel):
     """Новый контракт мира без roles_catalog; роли назначаются отдельно."""
     model_config = ConfigDict(extra="forbid")
@@ -116,19 +104,16 @@ class InitialWorldV2(BaseModel):
     style: Optional[StyleSpec] = None
     opening_hook: str = Field(..., min_length=10, max_length=500)
 
-
 class PlayerRoleAssignment(BaseModel):
     model_config = ConfigDict(extra="forbid")
     player_id: str = Field(..., min_length=1, max_length=64)
     role: str = Field(..., min_length=1, max_length=80)
     summary: str = Field(..., min_length=3, max_length=280)
 
-
 class WorldAndRoles(BaseModel):
     model_config = ConfigDict(extra="forbid")
     world: InitialWorldV2
     roles_for_players: List[PlayerRoleAssignment] = Field(..., min_items=1, max_items=64)
-
 
 # --------------------------- STATE (runtime) ---------------------------
 
@@ -139,57 +124,9 @@ class PrivateHistoryEntry(BaseModel):
     echo_of_action: str = Field(..., min_length=1, max_length=400)
     highlights: Optional[List[str]] = Field(default=None, min_items=0, max_items=8)
 
-
 class GeneralHistoryEntry(BaseModel):
     model_config = ConfigDict(extra="forbid")
     text: str = Field(..., min_length=1, max_length=4000)
-    highlights: Optional[List[str]] = Field(default=None, min_items=0, max_items=8)
-
-
-class State(BaseModel):
-    """Полное состояние сессии, сохраняемое по ходам."""
-    model_config = ConfigDict(extra="forbid")
-
-    # Мир
-    setting: str = Field(..., min_length=20, max_length=2000)
-    location: Optional[str] = Field(default=None, max_length=400)
-    world_flags: Dict[str, str] = Field(default_factory=dict)
-
-    # Сущности
-    players: List[PlayerState] = Field(default_factory=list, min_items=0, max_items=64)
-    npcs: List[NpcEntry] = Field(default_factory=list, min_items=0, max_items=32)
-    available_items: List[ItemEntry] = Field(default_factory=list, min_items=0, max_items=50)
-
-    # Истории
-    private_history: List[PrivateHistoryEntry] = Field(default_factory=list, min_items=0, max_items=200)
-    general_history: List[GeneralHistoryEntry] = Field(default_factory=list, min_items=0, max_items=200)
-
-    # Долговременные элементы
-    open_threads: List[str] = Field(default_factory=list, min_items=0, max_items=24)
-    clocks: Dict[str, int] = Field(default_factory=dict)  # имя таймера -> значение (>=0)
-
-    # Прочее
-    title: Optional[str] = Field(default=None, max_length=120)
-    story_theme: Optional[StoryTheme] = None
-    turn: int = Field(0, ge=0)
-
-
-# --------------------------- PLAN (Narrative) ---------------------------
-
-class BeatPlan(BaseModel):
-    """Короткий «скелет» сцены: цель, ставки, препятствие, ожидаемые последствия."""
-    model_config = ConfigDict(extra="forbid")
-
-    goal: str = Field(..., min_length=3, max_length=200)
-    stakes: str = Field(..., min_length=3, max_length=200)
-    obstacle: str = Field(..., min_length=3, max_length=200)
-    twist_or_clue: Optional[str] = Field(default=None, min_length=3, max_length=200)
-
-    scene_outcomes: List[str] = Field(..., min_items=1, max_items=5)
-    must_mention: List[str] = Field(default_factory=list, min_items=0, max_items=8)
-    forbidden: List[str] = Field(default_factory=list, min_items=0, max_items=16)
-    open_threads_next: List[str] = Field(default_factory=list, min_items=0, max_items=8)
-
 
 # --------------------------- EFFECTS (delta) ---------------------------
 
@@ -203,7 +140,6 @@ class PlayerEffect(BaseModel):
     items_remove: List[str] = Field(default_factory=list, min_items=0, max_items=12)
     position: Optional[str] = Field(default=None, max_length=32)
 
-
 class NpcEffect(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
     npc_id: str = Field(validation_alias=AliasChoices("npc_id", "id"), min_length=1, max_length=64)
@@ -213,13 +149,11 @@ class NpcEffect(BaseModel):
     items_add: List[str] = Field(default_factory=list, min_items=0, max_items=12)
     items_remove: List[str] = Field(default_factory=list, min_items=0, max_items=12)
 
-
 class Introductions(BaseModel):
     model_config = ConfigDict(extra="forbid")
     npcs: List[NpcEntry] = Field(default_factory=list, min_items=0, max_items=10)
     items: List[ItemEntry] = Field(default_factory=list, min_items=0, max_items=12)
     locations: List[str] = Field(default_factory=list, min_items=0, max_items=10)
-
 
 class EffectsDelta(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -237,11 +171,9 @@ class EffectsDelta(BaseModel):
     # Введение новых сущностей
     introductions: Introductions = Field(default_factory=Introductions)
 
-
 # Совместимый псевдоним для некоторых мест кода/логов
 class Effects(EffectsDelta):
     pass
-
 
 # --------------------------- FACTS (normalized) ---------------------------
 
@@ -251,7 +183,6 @@ class FactRefs(BaseModel):
     items: List[str] = Field(default_factory=list, min_items=0, max_items=16)
     npcs: List[str] = Field(default_factory=list, min_items=0, max_items=16)
     locations: List[str] = Field(default_factory=list, min_items=0, max_items=16)
-
 
 class VerifiedFact(BaseModel):
     """Нормализованный факт, полученный из Effects (public/private)."""
@@ -263,7 +194,6 @@ class VerifiedFact(BaseModel):
     player_id: Optional[str] = Field(default=None, max_length=64)
     refs: FactRefs = Field(default_factory=FactRefs)
 
-
 # --------------------------- OUTLINES (bullet plans) ---------------------------
 
 class Outline(BaseModel):
@@ -272,19 +202,16 @@ class Outline(BaseModel):
     bullets: List[str] = Field(..., min_items=1, max_items=24)
     must_include_ids: List[str] = Field(default_factory=list, min_items=0, max_items=24)
 
-
 # --------------------------- STORIES (LLM) ---------------------------
 
 class RawStory(BaseModel):
     model_config = ConfigDict(extra="forbid")
     text: str = Field(..., min_length=0, max_length=4000)
 
-
 class EffectsAndRaw(BaseModel):
     model_config = ConfigDict(extra="forbid")
     effects: EffectsDelta
     raw: RawStory
-
 
 class PlayerStory(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -292,12 +219,10 @@ class PlayerStory(BaseModel):
     highlights: Optional[List[str]] = Field(default=None, min_items=0, max_items=8)
     echo_of_action: str = Field(..., min_length=1, max_length=400)
 
-
 class GeneralStory(BaseModel):
     model_config = ConfigDict(extra="forbid")
     text: str = Field(..., min_length=1, max_length=4000)
     highlights: Optional[List[str]] = Field(default=None, min_items=0, max_items=8)
-
 
 # --------------------------- TURN CONFIG/OUTPUTS ---------------------------
 
@@ -308,11 +233,10 @@ class TurnConfig(BaseModel):
     effects_n_predict: int = Field(700, ge=64, le=8192)
     private_n_predict: int = Field(700, ge=64, le=8192)
     general_n_predict: int = Field(1000, ge=64, le=8192)
-    temperature_effects: float = Field(0.35, ge=0.0, le=1.0)
-    temperature_private: float = Field(0.35, ge=0.0, le=1.0)
-    temperature_general: float = Field(0.35, ge=0.0, le=1.0)
+    temperature_effects: float = Field(0.2, ge=0.0, le=1.0)
+    temperature_private: float = Field(0.5, ge=0.0, le=1.0)
+    temperature_general: float = Field(0.7, ge=0.0, le=1.0)
     llm_timeout: int = Field(180, ge=5, le=1200)
-
 
 class TurnOutputs(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -325,7 +249,6 @@ class TurnOutputs(BaseModel):
     coverage: Optional[float] = Field(default=None, ge=0.0, le=1.0)     # NEW (метрика попадания фактов)
     turn: int
     telemetry: Dict[str, Any] = Field(default_factory=dict)
-
 
 # --------------------------- JSON SCHEMA EXPORT ---------------------------
 
@@ -340,7 +263,6 @@ def as_json_schema(model_or_instance: Any) -> Dict[str, Any]:
     if isinstance(model_or_instance, dict):
         return model_or_instance
     raise TypeError("as_json_schema: expected pydantic model/class or dict")
-
 
 # --------------------------- АЛИАСЫ ДЛЯ СОВМЕСТИМОСТИ ---------------------------
 
