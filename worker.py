@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from core.db import (
     get_async_sessionmaker,
     get_redis,
+    get_session,
     load_session_state,
     save_session_state,
 )
@@ -32,8 +33,8 @@ logger.propagate = True
 
 # -------------------- Конфиг по умолчанию --------------------
 DEFAULT_TURN_CFG = TurnConfig(
-    timeout=60.0,   # время ожидания хода
-    seed=None,      # фиксированный сид генерации (для отладки) или None
+    group_chat_id=0,  # будет переопределён реальным chat_id при запуске сессии
+    timeout=60,       # время ожидания хода
 )
 
 # -------------------- Redis-ключи и утилиты --------------------
@@ -205,6 +206,29 @@ async def _start_turn_loop_for_session(session_id: int, cfg: TurnConfig = DEFAUL
     players = state.get("players", [])
     expect_actions = max(1, len(players))
 
+    # Переопределим конфиг для конкретной сессии
+    session_cfg = cfg.model_copy()
+    session_group_chat_id: Optional[int] = None
+
+    # 1) Попробуем взять chat_id из JSON-состояния (мог быть сохранён ботом)
+    try:
+        maybe_from_state = state.get("group_chat_id") or (state.get("session") or {}).get("group_chat_id")
+        if maybe_from_state is not None:
+            session_group_chat_id = int(maybe_from_state)
+    except Exception:
+        session_group_chat_id = None
+
+    # 2) Если в state его нет — загрузим саму сессию из БД
+    if session_group_chat_id is None:
+        session_row = await get_session(str(session_id))
+        if session_row and session_row.group_chat_id is not None:
+            session_group_chat_id = int(session_row.group_chat_id)
+
+    if session_group_chat_id is not None:
+        session_cfg = session_cfg.model_copy(update={"group_chat_id": session_group_chat_id})
+    else:
+        logger.warning("Worker: session %s has no group_chat_id, using default=%s", session_id, session_cfg.group_chat_id)
+
     logger.info(
         "Worker: start run_turn_loop sid=%s expect_actions=%s joined=%s",
         session_id, expect_actions,
@@ -216,7 +240,7 @@ async def _start_turn_loop_for_session(session_id: int, cfg: TurnConfig = DEFAUL
         await run_turn_loop(
             session_id=session_id,
             callbacks=callbacks,
-            cfg=cfg,
+            cfg=session_cfg,
             expect_actions=expect_actions,
             idle_sleep=0.5,
         )
