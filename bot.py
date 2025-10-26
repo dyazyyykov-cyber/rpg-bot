@@ -37,6 +37,7 @@ if str(CORE) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from core.utils import get_env, chunk_text
+from core.llm import LLMRequestTimeoutError
 from core.db import (
     AsyncSessionLocal,
     init_db,
