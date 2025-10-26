@@ -196,6 +196,7 @@ def make_callbacks_for_session(session_id: int) -> TurnIOCallbacks:
 # -------------------- Управляющая логика воркера --------------------
 
 _running_tasks: Dict[int, asyncio.Task] = {}  # session_id -> task
+_monitor_task: Optional[asyncio.Task] = None
 
 async def _start_turn_loop_for_session(session_id: int, cfg: TurnConfig = DEFAULT_TURN_CFG) -> None:
     """
@@ -299,6 +300,14 @@ async def _monitor_active_sessions() -> None:
 # -------------------- main --------------------
 
 def _handle_sigterm():
+    global _monitor_task
+
+    if _monitor_task and not _monitor_task.done():
+        try:
+            _monitor_task.cancel()
+        except Exception:
+            pass
+
     for t in list(_running_tasks.values()):
         try:
             t.cancel()
@@ -310,7 +319,8 @@ async def _amain() -> None:
     _ = await get_async_sessionmaker()
     _ = await get_redis()
 
-    task = asyncio.create_task(_monitor_active_sessions())
+    global _monitor_task
+    _monitor_task = asyncio.create_task(_monitor_active_sessions())
 
     loop = asyncio.get_running_loop()
     try:
@@ -321,13 +331,24 @@ async def _amain() -> None:
         pass
 
     try:
-        await task
+        try:
+            await _monitor_task
+        except asyncio.CancelledError:
+            pass
     finally:
         for t in list(_running_tasks.values()):
             try:
                 t.cancel()
             except Exception:
                 pass
+
+        if _monitor_task and not _monitor_task.done():
+            try:
+                _monitor_task.cancel()
+            except Exception:
+                pass
+
+        _monitor_task = None
 
 def main() -> None:
     try:
