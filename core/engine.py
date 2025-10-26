@@ -11,12 +11,14 @@ from .llm import generate_json  # единая точка входа в LLM (str
 from .prompts import (
     build_beat_plan_prompt,
     build_effects_prompt,
+    build_general_outline_prompt,
     build_general_story_prompt,
     build_private_story_prompt,
     BANLIST_DEFAULT,
 )
 from .schemas import (
     BeatPlan,
+    Outline,
     EffectsAndRawSchema,
     EffectsDelta,
     GeneralStory,
@@ -332,6 +334,64 @@ def _normalize_general_story(obj: Any) -> Dict[str, Any]:
         d["highlights"] = [str(hl)]
     return d
 
+
+def _outline_to_dict(outline: Optional[Union[Outline, Dict[str, Any]]]) -> Optional[Dict[str, Any]]:
+    if outline is None:
+        return None
+    if isinstance(outline, dict):
+        return outline
+    if hasattr(outline, "model_dump"):
+        return outline.model_dump(exclude_none=True)  # type: ignore[attr-defined]
+    return None
+
+
+def _fallback_outline(
+    actions_public: List[Dict[str, str]],
+    raw_story: str,
+    facts: List[str],
+    open_threads: Optional[List[str]] = None,
+) -> Outline:
+    bullets: List[str] = []
+    for act in actions_public:
+        player = str(act.get("player") or "Игрок").strip()
+        text = str(act.get("text") or "действует").strip()
+        if not text.endswith("."):
+            text = text + "."
+        bullets.append(f"{player} {text}")
+
+    raw_first = str(raw_story or "").strip()
+    if raw_first:
+        raw_first = raw_first.split(".")[0].strip()
+        if raw_first:
+            bullets.append(raw_first + ".")
+
+    for fact in facts[:3]:
+        s = str(fact).strip()
+        if s:
+            bullets.append(s if s.endswith(".") else s + ".")
+
+    hook = None
+    if open_threads:
+        hook = str(open_threads[0]).strip()
+    if not hook:
+        hook = "Туман на мосту сгущается и обещает новое осложнение."
+    bullets.append(hook if hook.endswith(".") else hook + ".")
+
+    # ensure minimum length 4 and maximum 6
+    default_fillers = [
+        "NPC реагируют на произошедшее, меняя расстановку сил.",
+        "Игроки ощущают, что ставки растут с каждой минутой.",
+    ]
+    i = 0
+    while len(bullets) < 4 and i < len(default_fillers):
+        bullets.append(default_fillers[i])
+        i += 1
+
+    bullets = [b.strip() for b in bullets if b.strip()][:6]
+    if not bullets:
+        bullets = ["Сцена замирает, но напряжение только растёт."]
+    return Outline(bullets=bullets)
+
 # ---------------------------- Изменение состояния ----------------------------
 
 def apply_effects(state: Dict[str, Any], effects: Union[EffectsDelta, Dict[str, Any]]) -> Dict[str, Any]:
@@ -493,9 +553,22 @@ def push_private_story(state: dict, player_id: str, story, *, keep_last: int = 5
     state["private_history"] = [entry]
 
 
-def push_general_story(state: Dict[str, Any], story: Union[GeneralStory, Dict[str, Any]], *, keep_last: int = 80) -> None:
+def push_general_story(
+    state: Dict[str, Any],
+    story: Union[GeneralStory, Dict[str, Any]],
+    *,
+    outline: Optional[Union[Outline, Dict[str, Any], List[str]]] = None,
+    keep_last: int = 80,
+) -> None:
     history = state.setdefault("general_history", [])
     entry = _as_dict(story)
+    if outline is not None:
+        if isinstance(outline, list):
+            entry["outline"] = [str(x) for x in outline if str(x).strip()]
+        elif isinstance(outline, dict):
+            entry["outline"] = [str(x) for x in outline.get("bullets", []) if str(x).strip()]
+        elif hasattr(outline, "bullets"):
+            entry["outline"] = [str(x) for x in getattr(outline, "bullets", []) if str(x).strip()]
     history.append(entry)
     if keep_last and len(history) > keep_last:
         state["general_history"] = history[-keep_last:]
@@ -809,6 +882,58 @@ async def run_turn_with_llm(
     # факты для обязательного включения
     facts = _extract_facts_for_general(state, eff_for_apply, private_outputs, plan_obj, actions_public)
 
+    outline_prompt = build_general_outline_prompt(
+        snapshot=world_snapshot,
+        raw_story=str(getattr(raw_story_model, "text", "") or ""),
+        prev_general_tail=[(g.get("text", "") if isinstance(g, dict) else str(getattr(g, "text", ""))) for g in general_tail],
+        actions_public=actions_public,
+        private_echos=private_echos_list,
+        effects=eff_relinked,
+        open_threads=state.get("open_threads") or [],
+        beat_plan=_as_dict(plan_obj),
+        facts=facts,
+        theme=theme,
+        forbidden=banlist,
+    )
+    try:
+        with open(os.path.join(turn_dir, "general_outline_prompt.txt"), "w", encoding="utf-8") as f:
+            f.write(outline_prompt)
+    except Exception:
+        pass
+
+    logger.info("TURN[%s #%d]: request GeneralOutline", sid, turn_no)
+
+    outline_raw = await generate_json(
+        model=None,
+        schema=Outline,
+        prompt=outline_prompt,
+        temperature=float(getattr(cfg, "temperature_general_outline", getattr(cfg, "temperature_effects", 0.35))),
+        top_p=float(getattr(cfg, "top_p_general_outline", STRUCT_TOP_P or 0.0)),
+        seed=LLM_SEED_STRUCT,
+        timeout=getattr(cfg, "llm_timeout", None),
+        log_prefix="GENERAL_OUTLINE",
+        log_dir=llm_dir,
+        forbidden=banlist,
+        max_retries=1,
+    )
+
+    outline_model: Outline
+    try:
+        outline_model = Outline.model_validate(outline_raw)
+    except ValidationError as ve:
+        logger.warning("GeneralOutline validation failed: %s — using fallback", ve)
+        outline_model = _fallback_outline(
+            actions_public,
+            str(getattr(raw_story_model, "text", "") or ""),
+            facts,
+            state.get("open_threads") or [],
+        )
+
+    try:
+        _write_json(os.path.join(turn_dir, "general_outline.json"), _as_dict(outline_model))
+    except Exception:
+        pass
+
     gen_prompt = build_general_story_prompt(
         snapshot=world_snapshot,
         raw_story=str(getattr(raw_story_model, "text", "") or ""),
@@ -819,6 +944,7 @@ async def run_turn_with_llm(
         open_threads=state.get("open_threads") or [],
         beat_plan=_as_dict(plan_obj),
         facts=facts,
+        outline=_outline_to_dict(outline_model),
         theme=theme,
         forbidden=banlist,
     )
@@ -897,7 +1023,7 @@ async def run_turn_with_llm(
         general_model = GeneralStory.model_validate(gen_norm)
 
     # фиксируем общий абзац
-    push_general_story(state, general_model)
+    push_general_story(state, general_model, outline=outline_model)
     _write_json(os.path.join(turn_dir, "general_story.json"), _as_dict(general_model))
 
     # ---------------- NEXT TURN + обновление нитей ----------------
@@ -918,6 +1044,7 @@ async def run_turn_with_llm(
         raw=raw_story_model,
         players_private={k: v for k, v in private_outputs.items() },
         general=general_model,
+        general_outline=outline_model,
         turn=int(state["turn"]),
         telemetry={},
     )
