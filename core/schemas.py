@@ -251,7 +251,7 @@ class TurnConfig(BaseModel):
     temperature_effects: float = Field(0.2, ge=0.0, le=1.0)
     temperature_private: float = Field(0.5, ge=0.0, le=1.0)
     temperature_general: float = Field(0.7, ge=0.0, le=1.0)
-    llm_timeout: int = Field(180, ge=5, le=1200)
+    llm_timeout: int = Field(480, ge=5, le=1200)
 
 class TurnOutputs(BaseModel):
     model_config = ConfigDict(extra="forbid")

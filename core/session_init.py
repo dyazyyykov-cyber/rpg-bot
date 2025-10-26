@@ -38,7 +38,7 @@ logger.propagate = True
 SESSION_INIT_TEMPERATURE = float(get_env("SESSION_INIT_TEMPERATURE", "0.6"))
 SESSION_INIT_TOP_P       = float(get_env("SESSION_INIT_TOP_P", "0.92"))
 SESSION_INIT_N_PREDICT   = int(get_env("SESSION_INIT_N_PREDICT", "1000"))
-SESSION_INIT_TIMEOUT     = int(get_env("SESSION_INIT_TIMEOUT", "300"))
+SESSION_INIT_TIMEOUT     = int(get_env("SESSION_INIT_TIMEOUT", "600"))
 
 
 # -------------------- Grammar-friendly JSON Schemas --------------------
