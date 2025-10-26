@@ -12,6 +12,19 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import aiohttp
 
+
+class LLMRequestTimeoutError(asyncio.TimeoutError):
+    """Timeout while waiting for the LLM HTTP endpoint."""
+
+    def __init__(self, *, url: str, timeout: Optional[float]):
+        self.url = url
+        self.timeout = timeout
+        if timeout is not None:
+            message = f"LLM request to {url} timed out after {timeout:.0f}s"
+        else:
+            message = f"LLM request to {url} timed out"
+        super().__init__(message)
+
 from .utils import get_env
 from .schemas import as_json_schema  # единая точка экспорта схем
 
@@ -56,7 +69,12 @@ def _dump_json(path: str, obj: Any) -> None:
 # ===================== HTTP =====================
 
 async def _http_post_json(payload: Dict[str, Any], timeout: Optional[int]) -> Dict[str, Any]:
-    client_timeout = aiohttp.ClientTimeout(total=timeout or LLM_HTTP_TIMEOUT)
+    effective_timeout: Optional[int]
+    if timeout is None or (isinstance(timeout, (int, float)) and timeout <= 0):
+        effective_timeout = LLM_HTTP_TIMEOUT
+    else:
+        effective_timeout = timeout
+    client_timeout = aiohttp.ClientTimeout(total=effective_timeout)
 
     # минимальная отладочная сводка
     dbg = {
@@ -79,22 +97,30 @@ async def _http_post_json(payload: Dict[str, Any], timeout: Optional[int]) -> Di
         pass
     logger.info("LLM POST: %s", dbg)
 
-    async with aiohttp.ClientSession(timeout=client_timeout) as sess:
-        async with sess.post(LLM_URL, json=payload) as resp:
-            text = await resp.text()
-            if LOG_LLM_FULL:
+    try:
+        async with aiohttp.ClientSession(timeout=client_timeout) as sess:
+            async with sess.post(LLM_URL, json=payload) as resp:
+                text = await resp.text()
+                if LOG_LLM_FULL:
+                    try:
+                        parsed = json.loads(text)
+                    except Exception:
+                        parsed = {"status_code": resp.status, "text": text[:20000]}
+                    _dump_json(os.path.join(".", "logs", f"HTTP_{_ts()}.json"), parsed)
+                if resp.status != 200:
+                    raise RuntimeError(f"LLM HTTP {resp.status}: {text[:1500]}")
                 try:
-                    parsed = json.loads(text)
+                    return json.loads(text)
                 except Exception:
-                    parsed = {"status_code": resp.status, "text": text[:20000]}
-                _dump_json(os.path.join(".", "logs", f"HTTP_{_ts()}.json"), parsed)
-            if resp.status != 200:
-                raise RuntimeError(f"LLM HTTP {resp.status}: {text[:1500]}")
-            try:
-                return json.loads(text)
-            except Exception:
-                logger.exception("LLM: invalid JSON in HTTP response body (not message.content)")
-                raise
+                    logger.exception("LLM: invalid JSON in HTTP response body (not message.content)")
+                    raise
+    except asyncio.TimeoutError as exc:
+        logger.warning(
+            "LLM HTTP timeout after %ss (url=%s)",
+            "∞" if effective_timeout is None else effective_timeout,
+            LLM_URL,
+        )
+        raise LLMRequestTimeoutError(url=LLM_URL, timeout=effective_timeout) from exc
 
 # ===================== PROMPT / MESSAGES =====================
 

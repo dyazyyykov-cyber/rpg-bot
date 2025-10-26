@@ -37,6 +37,7 @@ if str(CORE) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from core.utils import get_env, chunk_text
+from core.llm import LLMRequestTimeoutError
 from core.db import (
     AsyncSessionLocal,
     init_db,
@@ -363,6 +364,40 @@ async def _join_session(
 
 # ---------------- Start world flow ----------------
 
+def _format_generation_error(stage: str, exc: BaseException) -> str:
+    """Return a human-friendly message for generation failures."""
+    if isinstance(exc, LLMRequestTimeoutError):
+        timeout = exc.timeout
+        timeout_part = (
+            f" за {int(timeout)} с" if isinstance(timeout, (int, float)) and timeout > 0 else ""
+        )
+        return (
+            f"⏳ {stage}: модель не ответила{timeout_part}."
+            " Проверьте, что локальный сервис генерации запущен и отвечает, затем попробуйте снова."
+        )
+    if isinstance(exc, asyncio.TimeoutError):
+        return f"⏳ {stage}: время ожидания ответа модели истекло. Попробуйте позже."
+    return f"❌ {stage}: произошла ошибка. Попробуйте позже."
+
+
+async def _handle_generation_error(
+    *,
+    stage: str,
+    exc: BaseException,
+    chat_id: int,
+    status_msg: Optional[Message],
+) -> Message:
+    if isinstance(exc, asyncio.TimeoutError):
+        logger.warning("STARTWORLD: %s timed out: %r", stage, exc)
+    else:
+        logger.exception("STARTWORLD: %s failed", stage)
+    return await _send_or_edit_status(
+        chat_id=chat_id,
+        status_msg=status_msg,
+        text=_format_generation_error(stage, exc),
+    )
+
+
 async def _start_world_flow(*, session_id: str, group_chat_id: int, reply_target: Union[Message, CallbackQuery]) -> None:
     joined = await _players_joined_list(session_id)
     if not joined:
@@ -386,7 +421,16 @@ async def _start_world_flow(*, session_id: str, group_chat_id: int, reply_target
         story_theme=story_theme,
         timeout=None,
     )
-    world_state: Dict[str, Any] = await world_state_result if inspect.isawaitable(world_state_result) else world_state_result
+    try:
+        world_state: Dict[str, Any] = await world_state_result if inspect.isawaitable(world_state_result) else world_state_result
+    except Exception as exc:
+        status_msg = await _handle_generation_error(
+            stage="Генерация мира",
+            exc=exc,
+            chat_id=group_chat_id,
+            status_msg=status_msg,
+        )
+        return
     if story_theme and not world_state.get("story_theme"):
         world_state["story_theme"] = story_theme
 
@@ -403,7 +447,16 @@ async def _start_world_flow(*, session_id: str, group_chat_id: int, reply_target
         story_theme=story_theme,
         timeout=None,
     )
-    roles = await roles_result if inspect.isawaitable(roles_result) else roles_result
+    try:
+        roles = await roles_result if inspect.isawaitable(roles_result) else roles_result
+    except Exception as exc:
+        status_msg = await _handle_generation_error(
+            stage="Распределение ролей",
+            exc=exc,
+            chat_id=group_chat_id,
+            status_msg=status_msg,
+        )
+        return
     roles_by_pid: Dict[str, Dict[str, str]] = {r["player_id"]: r for r in roles}
 
     async with AsyncSessionLocal() as dbs:
@@ -448,7 +501,23 @@ async def _start_world_flow(*, session_id: str, group_chat_id: int, reply_target
             story_theme=story_theme,
             timeout=None,
         )
-        story = await story_result if inspect.isawaitable(story_result) else story_result
+        try:
+            story = await story_result if inspect.isawaitable(story_result) else story_result
+        except Exception as exc:
+            status_msg = await _handle_generation_error(
+                stage=f"Пролог для {name}",
+                exc=exc,
+                chat_id=group_chat_id,
+                status_msg=status_msg,
+            )
+            try:
+                await bot.send_message(
+                    group_chat_id,
+                    _format_generation_error(stage=f"Пролог для {escape(name)}", exc=exc),
+                )
+            except Exception:
+                pass
+            continue
         role_line = roles_by_pid.get(pid, {}).get("role") or ""
         dm_text = f"<b>Ваша роль:</b> {escape(role_line)}\n<b>Пролог</b>\n{escape(story.get('text') or '')}"
         try:
