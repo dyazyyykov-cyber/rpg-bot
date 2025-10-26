@@ -8,6 +8,7 @@ import shutil
 import sys
 import importlib.util
 import pathlib
+from contextlib import suppress
 from html import escape
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -88,6 +89,9 @@ dp = Dispatcher()
 router = Router()
 dp.include_router(router)
 
+EVENT_QUEUE_KEY = "queue:bot_events"
+_event_task: Optional[asyncio.Task] = None
+
 # ---------------- Helpers ----------------
 
 def _logs_base() -> Path:
@@ -102,6 +106,147 @@ async def _cleanup_session_logs(session_id: str) -> None:
             logger.info("LOGS: removed %s", path)
     except Exception as e:
         logger.warning("LOGS: failed to remove %s: %r", path, e)
+
+
+def _session_actions_key(session_id: str) -> str:
+    return f"session:{session_id}:actions"
+
+
+async def _resolve_session_chat_id(session_id: str) -> Optional[int]:
+    async with AsyncSessionLocal() as dbs:
+        sess: Session | None = (
+            await dbs.execute(select(Session).where(Session.id == session_id))
+        ).scalar_one_or_none()
+        if not sess or sess.group_chat_id is None:
+            return None
+        return int(sess.group_chat_id)
+
+
+async def _resolve_player_contact(session_id: str, player_id: str) -> Tuple[Optional[int], Optional[str]]:
+    async with AsyncSessionLocal() as dbs:
+        res = await dbs.execute(
+            select(SessionPlayer, Player)
+            .join(Player, SessionPlayer.player_id == Player.id)
+            .where(
+                SessionPlayer.session_id == session_id,
+                SessionPlayer.player_id == player_id,
+            )
+        )
+        row = res.first()
+        if not row:
+            return None, None
+        sp, player = row
+        chat_id = sp.dm_chat_id or (player.tg_id if player else None)
+        name = player.name if player else None
+        return chat_id, name
+
+
+def _format_highlights(highlights: Any) -> Optional[str]:
+    if not isinstance(highlights, list):
+        return None
+    lines: List[str] = []
+    for item in highlights:
+        txt = str(item or "").strip()
+        if not txt:
+            continue
+        lines.append(f"• {escape(txt)}")
+    if not lines:
+        return None
+    return "<b>Ключевые моменты:</b>\n" + "\n".join(lines)
+
+
+def _format_private_story_message(payload: Dict[str, Any]) -> Optional[str]:
+    text = str(payload.get("text") or "").strip()
+    echo = str(payload.get("echo_of_action") or "").strip()
+    highlights = payload.get("highlights")
+    parts: List[str] = []
+    if text:
+        parts.append(escape(text))
+    highlight_block = _format_highlights(highlights)
+    if highlight_block:
+        parts.append(highlight_block)
+    if echo:
+        parts.append(f"<b>Ваш ход:</b> {escape(echo)}")
+    if not parts:
+        return None
+    return "\n\n".join(parts)
+
+
+async def _handle_event(event: Dict[str, Any]) -> None:
+    session_id = str(event.get("session_id") or "").strip()
+    if not session_id:
+        return
+    event_type = str(event.get("type") or "").strip()
+    payload = event.get("payload") or {}
+
+    if event_type == "turn_generation_started":
+        chat_id = await _resolve_session_chat_id(session_id)
+        if chat_id is None:
+            return
+        received = int((payload or {}).get("received") or 0)
+        expected = int((payload or {}).get("expected") or 0)
+        if expected > 0:
+            text = f"🎲 Все ходы получены ({received}/{expected}). Генерирую продолжение истории…"
+        else:
+            text = "🎲 Генерирую продолжение истории…"
+        await bot.send_message(chat_id, text)
+        return
+
+    if event_type == "general_story":
+        chat_id = await _resolve_session_chat_id(session_id)
+        if chat_id is None:
+            return
+        text_val = str((payload or {}).get("text") or "")
+        highlight_block = _format_highlights((payload or {}).get("highlights"))
+        parts: List[str] = []
+        if text_val.strip():
+            parts.append(escape(text_val))
+        if highlight_block:
+            parts.append(highlight_block)
+        if not parts:
+            return
+        await _send_chunked(chat_id, "\n\n".join(parts))
+        return
+
+    if event_type == "private_story":
+        payload_dict = payload if isinstance(payload, dict) else {}
+        player_id = str(payload_dict.get("player_id") or "").strip()
+        if not player_id:
+            logger.warning("EVENTS: private_story without player_id for session %s", session_id)
+            return
+        dm_chat_id, _ = await _resolve_player_contact(session_id, player_id)
+        if dm_chat_id is None:
+            logger.warning("EVENTS: DM chat not found for session %s player %s", session_id, player_id)
+            return
+        message = _format_private_story_message(payload_dict)
+        if not message:
+            return
+        await _send_chunked(dm_chat_id, message)
+        return
+
+    logger.debug("EVENTS: unknown type %s", event_type)
+
+
+async def _events_consumer() -> None:
+    while True:
+        try:
+            item = await redis.blpop(EVENT_QUEUE_KEY, timeout=5)
+            if item is None:
+                continue
+            _queue, raw = item
+            if isinstance(raw, bytes):
+                raw = raw.decode("utf-8", errors="ignore")
+            try:
+                event = json.loads(raw)
+            except json.JSONDecodeError:
+                logger.warning("EVENTS: failed to decode event payload: %r", raw)
+                continue
+            await _handle_event(event)
+        except asyncio.CancelledError:
+            break
+        except Exception:
+            logger.exception("EVENTS: worker loop failed")
+            await asyncio.sleep(1.0)
 
 def _lobby_kb(session_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
@@ -395,6 +540,12 @@ async def _start_world_flow(*, session_id: str, group_chat_id: int, reply_target
         await bot.send_message(group_chat_id, "Никто не присоединился. Сначала «Присоединиться», затем «Начать игру».")
         return
 
+    await _cleanup_session_logs(session_id)
+    try:
+        await redis.delete(_session_actions_key(session_id))
+    except Exception:
+        pass
+
     logger.info("STARTWORLD: players=%d session=%s", len(joined), session_id)
     status_msg: Optional[Message] = await _send_or_edit_status(chat_id=group_chat_id, status_msg=None, text="Генерирую мир…")
 
@@ -647,7 +798,28 @@ async def cmd_act(message: Message):
         logger.info("ACT: no active session for tg=%s", message.from_user.id)
         return
 
-    payload = {"player_tg": message.from_user.id, "player_name": message.from_user.full_name, "text": act_text}
+    player = await get_player_by_tg(message.from_user.id)
+    if not player:
+        await message.answer("Вы ещё не присоединились к игре. Используйте /join в группе.")
+        logger.info("ACT: player record missing for tg=%s", message.from_user.id)
+        return
+
+    try:
+        await join_session(
+            session_id=session_id,
+            player_id=player.id,
+            dm_chat_id=message.chat.id,
+            dm_ok=True,
+        )
+    except Exception as exc:
+        logger.debug("ACT: join_session update failed sid=%s player=%s err=%r", session_id, player.id, exc)
+
+    payload = {
+        "player_tg": message.from_user.id,
+        "player_id": player.id,
+        "player_name": message.from_user.full_name,
+        "text": act_text,
+    }
     try:
         await redis.rpush(f"session:{session_id}:actions", json.dumps(payload, ensure_ascii=False))
         logger.info("ACT: accepted for sid=%s tg=%s text=%s", session_id, message.from_user.id, act_text)
@@ -666,6 +838,12 @@ async def cmd_newgame(message: Message):
 
     session_id = str(message.chat.id)
     title = message.chat.title or "Игра"
+
+    await _cleanup_session_logs(session_id)
+    try:
+        await redis.delete(_session_actions_key(session_id))
+    except Exception:
+        pass
 
     init_state = {
         "turn": 0,
@@ -717,6 +895,10 @@ async def cmd_endgame(message: Message):
         await dbs.commit()
     try:
         await redis.srem("sessions:active", session_id)
+    except Exception:
+        pass
+    try:
+        await redis.delete(_session_actions_key(session_id))
     except Exception:
         pass
     await _cleanup_session_logs(session_id)
@@ -831,14 +1013,25 @@ async def _register_commands() -> None:
 # ---------------- Entry ----------------
 
 async def main():
+    global _event_task
+
     await init_db()
     try:
         await bot.set_my_short_description("Сторителлер для кооперативной текстовой RPG.")
     except Exception:
         pass
     await _register_commands()
+
+    _event_task = asyncio.create_task(_events_consumer())
     logger.info("BOT: started")
-    await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+    try:
+        await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+    finally:
+        if _event_task and not _event_task.done():
+            _event_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await _event_task
+        _event_task = None
 
 if __name__ == "__main__":
     try:
