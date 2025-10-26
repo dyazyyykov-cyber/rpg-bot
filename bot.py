@@ -366,15 +366,6 @@ async def _join_session(
 
 def _format_generation_error(stage: str, exc: BaseException) -> str:
     """Return a human-friendly message for generation failures."""
-    if isinstance(exc, LLMRequestTimeoutError):
-        timeout = exc.timeout
-        timeout_part = (
-            f" за {int(timeout)} с" if isinstance(timeout, (int, float)) and timeout > 0 else ""
-        )
-        return (
-            f"⏳ {stage}: модель не ответила{timeout_part}."
-            " Проверьте, что локальный сервис генерации запущен и отвечает, затем попробуйте снова."
-        )
     if isinstance(exc, asyncio.TimeoutError):
         return f"⏳ {stage}: время ожидания ответа модели истекло. Попробуйте позже."
     return f"❌ {stage}: произошла ошибка. Попробуйте позже."
