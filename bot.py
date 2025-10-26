@@ -379,13 +379,14 @@ async def _start_world_flow(*, session_id: str, group_chat_id: int, reply_target
 
     players_payload = [{"player_id": pid, "name": name} for (pid, _tg, name) in joined]
 
-    world_state: Dict[str, Any] = await (generate_world_v2(
+    world_state_result = generate_world_v2(
         group_chat_id=group_chat_id,
         title=title,
         players=players_payload,
         story_theme=story_theme,
         timeout=None,
-    ) if inspect.isawaitable(generate_world_v2) else generate_world_v2)
+    )
+    world_state: Dict[str, Any] = await world_state_result if inspect.isawaitable(world_state_result) else world_state_result
     if story_theme and not world_state.get("story_theme"):
         world_state["story_theme"] = story_theme
 
@@ -396,12 +397,13 @@ async def _start_world_flow(*, session_id: str, group_chat_id: int, reply_target
 
     status_msg = await _send_or_edit_status(chat_id=group_chat_id, status_msg=status_msg, text="Распределяю роли…")
 
-    roles = await (generate_roles_for_players(
+    roles_result = generate_roles_for_players(
         state=world_state,
         players=players_payload,
         story_theme=story_theme,
         timeout=None,
-    ) if inspect.isawaitable(generate_roles_for_players) else generate_roles_for_players)
+    )
+    roles = await roles_result if inspect.isawaitable(roles_result) else roles_result
     roles_by_pid: Dict[str, Dict[str, str]] = {r["player_id"]: r for r in roles}
 
     async with AsyncSessionLocal() as dbs:
@@ -437,12 +439,13 @@ async def _start_world_flow(*, session_id: str, group_chat_id: int, reply_target
     sent_dm = 0
     for pid, tg, name in joined:
         pl_dict = {"player_id": pid, "name": name}
-        story = await (generate_initial_backstory(
+        story_result = generate_initial_backstory(
             state=world_state,
             player=pl_dict,
             story_theme=story_theme,
             timeout=None,
-        ) if inspect.isawaitable(generate_initial_backstory) else generate_initial_backstory)
+        )
+        story = await story_result if inspect.isawaitable(story_result) else story_result
         role_line = roles_by_pid.get(pid, {}).get("role") or ""
         dm_text = f"<b>Ваша роль:</b> {escape(role_line)}\n<b>Пролог</b>\n{escape(story.get('text') or '')}"
         try:
