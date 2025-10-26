@@ -20,6 +20,8 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.types import (
     BotCommand,
+    BotCommandScopeAllGroupChats,
+    BotCommandScopeAllPrivateChats,
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -62,7 +64,7 @@ LOGS_DIR = get_env("LOGS_DIR", "./logs")
 LOG_LEVEL = get_env("LOG_LEVEL", "INFO")
 logging.basicConfig(
     level=getattr(logging, str(LOG_LEVEL).upper(), logging.INFO),
-    format="%(levelname)s:%(name)s:%message)s",
+    format="%(levelname)s:%(name)s:%(message)s",
 )
 logger = logging.getLogger(__name__)
 
@@ -547,6 +549,29 @@ async def cmd_rules(message: Message):
 async def cmd_help(message: Message):
     # Alias to /rules
     await cmd_rules(message)
+
+# ---------------- Команды бота ----------------
+
+
+async def _register_commands() -> None:
+    group_commands = [
+        BotCommand(command="newgame", description="Создать новое лобби"),
+        BotCommand(command="join", description="Присоединиться к игре"),
+        BotCommand(command="startworld", description="Начать игру"),
+        BotCommand(command="endgame", description="Завершить игру"),
+        BotCommand(command="rules", description="Правила и помощь"),
+    ]
+    private_commands = [
+        BotCommand(command="act", description="Отправить действие персонажа"),
+        BotCommand(command="rules", description="Правила и помощь"),
+        BotCommand(command="help", description="Краткая справка"),
+    ]
+
+    try:
+        await bot.set_my_commands(group_commands, scope=BotCommandScopeAllGroupChats())
+        await bot.set_my_commands(private_commands, scope=BotCommandScopeAllPrivateChats())
+    except TelegramBadRequest as exc:  # pragma: no cover - зависит от API Telegram
+        logger.warning("BOT: failed to register commands: %s", exc)
 
 # ---------------- Entry ----------------
 

@@ -17,8 +17,10 @@ import re
 from datetime import datetime
 from typing import Optional, List, Dict, Any, Tuple
 
+import redis.asyncio as aioredis
+from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
-from sqlalchemy import select, and_, delete, text
+from sqlalchemy import select, and_, delete
 
 from .models import Base, Player, Session, SessionPlayer, Event, Item, Inventory
 from .utils import get_env
@@ -32,6 +34,41 @@ logger = logging.getLogger(__name__)
 DATABASE_URL = get_env("DATABASE_URL", "sqlite+aiosqlite:///./game.db")
 engine = create_async_engine(DATABASE_URL, echo=False, future=True)
 AsyncSessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+REDIS_URL = get_env("REDIS_URL", "redis://localhost:6379/0")
+_redis_client: Optional[Redis] = None
+
+
+async def get_async_sessionmaker() -> async_sessionmaker[AsyncSession]:
+    """Вернёт глобальный async_sessionmaker.
+
+    Worker ожидает корутину при прогреве соединений, поэтому сохраняем интерфейс
+    асинхронным, хотя внутри операция синхронная.
+    """
+
+    return AsyncSessionLocal
+
+
+async def get_redis() -> Redis:
+    """Ленивая инициализация Redis-клиента."""
+
+    global _redis_client
+    if _redis_client is None:
+        url = str(REDIS_URL or "redis://localhost:6379/0")
+        _redis_client = aioredis.from_url(url)
+    return _redis_client
+
+
+async def load_session_state(session_id: str | int) -> Dict[str, Any]:
+    """Снимает состояние сессии, используя стандартные миграции на чтение."""
+
+    return await get_state(str(session_id))
+
+
+async def save_session_state(session_id: str | int, state: Dict[str, Any]) -> None:
+    """Сохраняет состояние сессии."""
+
+    await save_state(str(session_id), state)
 
 # -----------------------------------------------------------------------------
 # Schema init (create + lightweight migrations for SQLite)
