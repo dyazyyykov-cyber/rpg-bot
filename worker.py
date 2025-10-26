@@ -48,6 +48,31 @@ def _redis_session_active_key() -> str:
 def _redis_session_control_key(session_id: int) -> str:
     return f"session:{session_id}:control"  # каналы управления (например, cancel)
 
+
+EVENT_QUEUE_KEY = "queue:bot_events"
+
+
+async def _publish_event(session_id: int, kind: str, payload: Dict[str, Any]) -> None:
+    """Отправить событие для бота (через Redis-очередь)."""
+
+    try:
+        redis = await get_redis()
+        event = {
+            "session_id": session_id,
+            "type": kind,
+            "payload": payload,
+            "ts": time.time(),
+        }
+        await redis.rpush(EVENT_QUEUE_KEY, json.dumps(event, ensure_ascii=False))
+        await redis.ltrim(EVENT_QUEUE_KEY, -1000, -1)
+    except Exception as exc:  # pragma: no cover - лог только
+        logger.warning(
+            "EVENT: failed to publish %s for session %s: %r",
+            kind,
+            session_id,
+            exc,
+        )
+
 # -------------------- Приём действий игроков --------------------
 
 async def _await_actions_for_session(
@@ -68,6 +93,21 @@ async def _await_actions_for_session(
     players: List[Dict[str, Any]] = state.get("players", [])
     need_tg_ids = [p.get("tg_id") for p in players if "tg_id" in p]
     need_tg_ids = [x for x in need_tg_ids if x is not None]
+    player_id_by_tg: Dict[int, str] = {}
+    player_name_by_tg: Dict[int, str] = {}
+    for info in players:
+        tg_val = info.get("tg_id")
+        if tg_val is None:
+            continue
+        try:
+            tg_int = int(tg_val)
+        except Exception:
+            continue
+        pid = str(info.get("player_id") or info.get("id") or "").strip()
+        if pid:
+            player_id_by_tg[tg_int] = pid
+        name = str(info.get("name") or tg_int)
+        player_name_by_tg[tg_int] = name
 
     logger.info(
         "Turn[%s]: load_state keys=%s",
@@ -98,10 +138,19 @@ async def _await_actions_for_session(
             tg = obj.get("player_tg")
             txt = (obj.get("text") or "").strip()
             if tg in need_tg_ids and txt:
+                map_id = None
+                map_name = None
+                try:
+                    tg_int = int(tg)
+                except Exception:
+                    tg_int = None
+                if tg_int is not None:
+                    map_id = player_id_by_tg.get(tg_int)
+                    map_name = player_name_by_tg.get(tg_int)
                 collected[tg] = PlayerAction(
-                    player_id=obj.get("player_id"),
+                    player_id=map_id or obj.get("player_id"),
                     player_tg=tg,
-                    player_name=obj.get("player_name") or str(tg),
+                    player_name=obj.get("player_name") or map_name or str(tg),
                     text=txt,
                 )
 
@@ -140,7 +189,17 @@ async def _save_state(session_id: int, state: Dict[str, Any]) -> None:
 # Для простоты — пишем в лог (в реальном коде — складируем в БД/Redis, либо дергаем вебхук бота).
 
 async def _notify_generation_started(session_id: int, actual: int = 0, expected: int = 0) -> None:
-    logger.info("Turn[%s]: collecting actions, expect_hint=%d timeout=%ss", session_id, expected, int(DEFAULT_TURN_CFG.timeout))
+    logger.info(
+        "Turn[%s]: generation started actions=%d expected=%d",
+        session_id,
+        actual,
+        expected,
+    )
+    await _publish_event(
+        session_id,
+        "turn_generation_started",
+        {"received": int(actual or 0), "expected": int(expected or 0)},
+    )
 
 async def _notify_effects(session_id: int, effects_obj: Any) -> None:
     try:
@@ -170,10 +229,29 @@ async def _notify_private(session_id: int, player_id: str, story_obj: Any) -> No
         (text[:120] + "...") if len(text) > 120 else text,
         f"echo({len(echo)}): {echo}" if echo else "—",
     )
+    if hasattr(story_obj, "model_dump"):
+        payload: Dict[str, Any] = story_obj.model_dump(exclude_none=True)  # type: ignore[attr-defined]
+    elif isinstance(story_obj, dict):
+        payload = {k: v for k, v in story_obj.items() if v is not None}
+    else:
+        payload = {
+            "text": text,
+            "echo_of_action": echo,
+            "highlights": getattr(story_obj, "highlights", None),
+        }
+    payload["player_id"] = str(player_id or "")
+    await _publish_event(session_id, "private_story", payload)
 
 async def _notify_general(session_id: int, story_obj: Any) -> None:
     text = story_obj.text if hasattr(story_obj, "text") else str(story_obj)
     logger.info("Turn[%s]: general | text(%d): %s", session_id, len(text), (text[:155] + "...") if len(text) > 155 else text)
+    if hasattr(story_obj, "model_dump"):
+        payload: Dict[str, Any] = story_obj.model_dump(exclude_none=True)  # type: ignore[attr-defined]
+    elif isinstance(story_obj, dict):
+        payload = {k: v for k, v in story_obj.items() if v is not None}
+    else:
+        payload = {"text": text, "highlights": getattr(story_obj, "highlights", None)}
+    await _publish_event(session_id, "general_story", payload)
 
 async def _notify_telemetry(session_id: int, data: Dict[str, Any]) -> None:
     logger.info("Turn[%s]: telemetry json(%d): %s", session_id, len(json.dumps(data, ensure_ascii=False)), json.dumps(data, ensure_ascii=False))
