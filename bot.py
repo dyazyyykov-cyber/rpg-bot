@@ -37,7 +37,14 @@ if str(CORE) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from core.utils import get_env, chunk_text
-from core.db import AsyncSessionLocal, init_db, create_or_reset_session
+from core.db import (
+    AsyncSessionLocal,
+    init_db,
+    create_or_reset_session,
+    get_or_create_player,
+    get_player_by_tg,
+    join_session,
+)
 
 # models: handle possible name collision
 try:
@@ -171,6 +178,188 @@ async def _get_lobby_panel(session_id: str) -> Optional[int]:
         return int(val)
     except Exception:
         return None
+
+async def _send_or_edit_status(*, chat_id: int, status_msg: Optional[Message], text: str) -> Message:
+    """Send a new status message or update the existing one."""
+    if status_msg is not None:
+        try:
+            return await bot.edit_message_text(
+                text,
+                chat_id=chat_id,
+                message_id=status_msg.message_id,
+            )
+        except TelegramBadRequest:
+            pass
+        except Exception as exc:  # pragma: no cover - logging only
+            logger.warning("STATUS: failed to edit message %s: %r", status_msg.message_id, exc)
+    sent = await bot.send_message(chat_id, text)
+    return sent
+
+async def _delete_status_silent(status_msg: Optional[Message]) -> None:
+    if not status_msg:
+        return
+    try:
+        await bot.delete_message(chat_id=status_msg.chat.id, message_id=status_msg.message_id)
+    except TelegramBadRequest:
+        pass
+    except Exception as exc:  # pragma: no cover - logging only
+        logger.warning(
+            "STATUS: failed to delete message %s in chat %s: %r",
+            status_msg.message_id,
+            status_msg.chat.id,
+            exc,
+        )
+
+async def _send_chunked(chat_id: int, text: str) -> None:
+    for part in chunk_text(text, hard_limit=4000):
+        await bot.send_message(chat_id, part)
+
+async def _post_or_update_lobby_panel(chat_id: int, session_id: str) -> Message:
+    """Post a lobby panel message or update the cached one if possible."""
+    text = await _lobby_text(session_id)
+    keyboard = _lobby_kb(session_id)
+    msg_id = await _get_lobby_panel(session_id)
+    if msg_id is not None:
+        try:
+            return await bot.edit_message_text(
+                text,
+                chat_id=chat_id,
+                message_id=msg_id,
+                reply_markup=keyboard,
+            )
+        except TelegramBadRequest:
+            pass
+        except Exception as exc:  # pragma: no cover - logging only
+            logger.warning(
+                "LOBBY: failed to edit panel sid=%s msg=%s: %r",
+                session_id,
+                msg_id,
+                exc,
+            )
+    sent = await bot.send_message(chat_id, text, reply_markup=keyboard)
+    return sent
+
+async def _find_active_session_for_user(tg_id: int) -> Optional[str]:
+    player = await get_player_by_tg(tg_id)
+    if not player:
+        return None
+
+    try:
+        active_raw = await redis.smembers("sessions:active")
+        active_ids = []
+        for raw in active_raw or []:
+            if isinstance(raw, bytes):
+                active_ids.append(raw.decode("utf-8"))
+            else:
+                active_ids.append(str(raw))
+    except Exception:
+        active_ids = []
+
+    async with AsyncSessionLocal() as dbs:
+        res = await dbs.execute(
+            select(SessionPlayer.session_id).where(SessionPlayer.player_id == player.id)
+        )
+        joined_ids = list(res.scalars().all())
+        if not joined_ids:
+            return None
+
+        res_sessions = await dbs.execute(
+            select(Session.id, Session.state).where(Session.id.in_(joined_ids))
+        )
+        session_states = {sid: dict(state or {}) for sid, state in res_sessions.all()}
+
+    for sid in active_ids:
+        st = session_states.get(sid)
+        if st and st.get("phase") == "running":
+            return sid
+
+    for sid in joined_ids:
+        st = session_states.get(sid)
+        if st and st.get("phase") == "running":
+            return sid
+
+    return None
+
+async def _join_session(
+    *,
+    session_id: str,
+    tg_id: int,
+    name: str,
+    dm_chat_id: Optional[int] = None,
+    dm_ok: Optional[bool] = None,
+) -> bool:
+    """Register a Telegram user in the session. Returns True if newly added."""
+    clean_name = (name or "").strip() or str(tg_id)
+    player = await get_or_create_player(tg_id=tg_id, name=clean_name)
+
+    async with AsyncSessionLocal() as dbs:
+        sess = (
+            await dbs.execute(select(Session).where(Session.id == session_id))
+        ).scalar_one_or_none()
+        if not sess:
+            raise RuntimeError(f"Session {session_id} not found")
+        state = dict(sess.state or {})
+        join_locked = bool(state.get("join_locked"))
+
+    async with AsyncSessionLocal() as dbs:
+        res = await dbs.execute(
+            select(SessionPlayer).where(
+                SessionPlayer.session_id == session_id,
+                SessionPlayer.player_id == player.id,
+            )
+        )
+        existing = res.scalar_one_or_none()
+
+    if join_locked and existing is None:
+        logger.info("JOIN: session %s is locked", session_id)
+        return False
+
+    await join_session(
+        session_id=session_id,
+        player_id=player.id,
+        dm_chat_id=dm_chat_id,
+        dm_ok=dm_ok,
+    )
+
+    async with AsyncSessionLocal() as dbs:
+        sess = (
+            await dbs.execute(select(Session).where(Session.id == session_id))
+        ).scalar_one_or_none()
+        if sess:
+            state = dict(sess.state or {})
+            players = list(state.get("players") or [])
+            updated = False
+            found = False
+            for idx, info in enumerate(players):
+                if str(info.get("player_id")) == player.id:
+                    found = True
+                    new_info = dict(info)
+                    entry_changed = False
+                    if new_info.get("name") != clean_name:
+                        new_info["name"] = clean_name
+                        entry_changed = True
+                    if new_info.get("tg_id") != tg_id:
+                        new_info["tg_id"] = tg_id
+                        entry_changed = True
+                    if entry_changed:
+                        players[idx] = new_info
+                        updated = True
+                    break
+            if not found:
+                players.append({
+                    "player_id": player.id,
+                    "name": clean_name,
+                    "tg_id": tg_id,
+                })
+                updated = True
+            if updated:
+                state["players"] = players
+                await dbs.execute(
+                    update(Session).where(Session.id == session_id).values(state=state)
+                )
+                await dbs.commit()
+
+    return existing is None
 
 # ---------------- Start world flow ----------------
 
