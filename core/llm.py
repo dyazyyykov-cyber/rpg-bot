@@ -34,7 +34,7 @@ logger.propagate = True
 # ===================== ENV / CONFIG =====================
 LLM_URL = get_env("LLM_URL", "http://127.0.0.1:8080/v1/chat/completions")
 LLM_MODEL_DEFAULT = get_env("LLM_MODEL", "qwen3")
-LLM_HTTP_TIMEOUT = int(get_env("LLM_HTTP_TIMEOUT", "180"))
+LLM_HTTP_TIMEOUT = int(get_env("LLM_HTTP_TIMEOUT", "480"))
 
 LOG_LLM_FULL = str(get_env("LOG_LLM_FULL", "1")).strip().lower() in ("1", "true", "yes", "on")
 LLM_LOG_CONTENT = str(get_env("LLM_LOG_CONTENT", "1")).strip().lower() in ("1", "true", "yes", "on")
