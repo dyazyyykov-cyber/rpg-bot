@@ -202,6 +202,21 @@ class Outline(BaseModel):
     bullets: List[str] = Field(..., min_items=1, max_items=24)
     must_include_ids: List[str] = Field(default_factory=list, min_items=0, max_items=24)
 
+# --------------------------- PLAN (beats) ---------------------------
+
+class BeatPlan(BaseModel):
+    """Опорный план сцены для LLM: цель, ставки, препятствия, исходы."""
+    model_config = ConfigDict(extra="forbid")
+
+    goal: str = Field(..., min_length=5, max_length=400)
+    stakes: str = Field(..., min_length=5, max_length=400)
+    obstacle: str = Field(..., min_length=5, max_length=400)
+    twist_or_clue: Optional[str] = Field(default=None, min_length=0, max_length=200)
+    scene_outcomes: List[str] = Field(..., min_items=1, max_items=3)
+    must_mention: List[str] = Field(default_factory=list, min_items=0, max_items=12)
+    forbidden: List[str] = Field(default_factory=list, min_items=0, max_items=20)
+    open_threads_next: List[str] = Field(default_factory=list, min_items=0, max_items=4)
+
 # --------------------------- STORIES (LLM) ---------------------------
 
 class RawStory(BaseModel):
