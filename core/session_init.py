@@ -463,6 +463,7 @@ def assemble_initial_state(
         "players": [
             {
                 "player_id": p.get("player_id"),
+                "tg_id":     p.get("tg_id"),
                 "name":      normalize_text(p.get("name", ""))[:80],
                 "hp":        int(p.get("hp", 100) or 100),
                 "max_hp":    int(p.get("max_hp", 100) or 100),
