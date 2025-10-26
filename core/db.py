@@ -718,6 +718,7 @@ async def build_players_snapshot(session_id: str) -> List[Dict[str, Any]]:
             entry: Dict[str, Any] = {
                 "player_id": r.player_id,
                 "name": (p.name if p and p.name else (str(p.tg_id) if p else "Unknown")),
+                "tg_id": p.tg_id if p else None,
                 "hp": r.hp,
                 "max_hp": r.max_hp,
                 "position": r.position or "scene",

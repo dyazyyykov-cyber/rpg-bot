@@ -412,8 +412,11 @@ async def _start_world_flow(*, session_id: str, group_chat_id: int, reply_target
         st_players = st.get("players") or []
         by_id = {str(p.get("player_id")): p for p in st_players if isinstance(p, dict)}
 
-        for pid, _tg, name in joined:
-            slot = by_id.get(pid) or {"player_id": pid, "name": name}
+        for pid, tg, name in joined:
+            slot = by_id.get(pid) or {"player_id": pid}
+            # Важно: сохраняем tg_id игрока в state, иначе воркер не распознаёт его ходы.
+            slot["tg_id"] = tg
+            slot["name"] = name
             r = roles_by_pid.get(pid) or {}
             if r:
                 slot["role"] = r.get("role") or slot.get("role") or ""
