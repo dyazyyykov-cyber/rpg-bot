@@ -327,6 +327,73 @@ def _summarize_effects(snapshot: Dict[str, Any], effects: Optional[Dict[str, Any
         parts.append("игроки: изменения инвентаря/позиции/ранений")
     return "; ".join(parts) or "—"
 
+def build_general_outline_prompt(
+    *,
+    snapshot: Dict[str, Any],
+    raw_story: str,
+    prev_general_tail: Optional[List[str]] = None,
+    actions_public: Optional[List[Dict[str, Any]]] = None,
+    private_echos: Optional[List[str]] = None,
+    effects: Optional[Dict[str, Any]] = None,
+    open_threads: Optional[List[str]] = None,
+    beat_plan: Optional[Dict[str, Any]] = None,
+    facts: Optional[List[str]] = None,
+    theme: Optional[str] = None,
+    forbidden: Optional[List[str]] = None,
+) -> str:
+    """Запрашивает буллет-план сцены для генерации общей истории."""
+    setting = str(snapshot.get("setting", "")).strip()
+    location = str(snapshot.get("location", "")).strip()
+    wf = snapshot.get("world_flags") or {}
+    wf_kv = ", ".join([f"{k}={v}" for k, v in list(wf.items())[:6]]) or "—"
+
+    acts = [a for a in (actions_public or []) if isinstance(a, dict) and a.get("text")]
+    echos = [e for e in (private_echos or []) if str(e).strip()]
+    prev_text = " ".join((prev_general_tail or [])[-1:]).strip()
+    recap = _recap_from_tail(prev_text, k=2, max_chars=320)
+
+    eff_digest = _summarize_effects(snapshot, effects)
+
+    parts: List[str] = []
+    parts.append(_HEADER + "\n")
+    parts.append("Составь план общей сцены. Верни JSON по схеме Outline.\n")
+    if theme:
+        parts.append(f"Тема сцены: {theme}\n")
+    parts.append("Контекст мира:\n")
+    parts.append("— Мир: " + setting + "\n")
+    parts.append("— Локация: " + location + "\n")
+    parts.append("— Флаги: " + wf_kv + "\n\n")
+    if acts:
+        parts.append("Публичные действия хода:\n" + "\n".join(["• " + str(a.get("player", "")) + " — " + str(a.get("text", "")) for a in acts]) + "\n")
+    else:
+        parts.append("Публичные действия хода:\n• —\n")
+    parts.append("Наблюдаемый итог (raw):\n• " + (raw_story or "—") + "\n")
+    parts.append("Сводка эффектов (используй минимум два пункта в плане):\n• " + eff_digest + "\n")
+    if facts:
+        facts_lines = "\n".join(f"• {str(f)}" for f in facts if str(f).strip())
+        if facts_lines:
+            parts.append("Обязательные факты/объекты:\n" + facts_lines + "\n")
+    if echos:
+        parts.append("Отголоски личных историй:\n" + "\n".join(["• " + str(e) for e in echos]) + "\n")
+    if recap:
+        parts.append("Последний абзац (перескажи своими словами):\n• " + recap + "\n")
+    if beat_plan:
+        parts.append("Опорный план (BeatPlan):\n" + json.dumps(_jsonable(beat_plan), ensure_ascii=False) + "\n")
+    if open_threads:
+        parts.append("Открытые нити (продвинь или зацепи одну):\n" + json.dumps(open_threads[:4], ensure_ascii=False) + "\n")
+
+    parts.append(
+        _banlist_block(forbidden)
+        + "Требования:\n"
+        "- bullets: 4–6 насыщенных пунктов, каждый ≤28 слов.\n"
+        "- Каждый пункт описывает одно конкретное событие/реакцию или новое напряжение.\n"
+        "- Используй точные имена игроков и NPC.\n"
+        "- Включи минимум две детали из эффектов и все обязательные факты.\n"
+        "- Последний пункт — крючок/вопрос/напряжение для следующего хода."
+    )
+    return "".join(parts)
+
+
 def build_general_story_prompt(
     *,
     snapshot: Dict[str, Any],
@@ -338,12 +405,13 @@ def build_general_story_prompt(
     open_threads: Optional[List[str]] = None,
     beat_plan: Optional[Dict[str, Any]] = None,
     facts: Optional[List[str]] = None,
+    outline: Optional[Dict[str, Any]] = None,
     theme: Optional[str] = None,
     forbidden: Optional[List[str]] = None,
 ) -> str:
     """
-    GENERAL: один абзац (6–8 коротких предложений), явно отражающий публичные действия и минимум 2 факта из effects.
-    Имена игроков использовать РОВНО в данном написании. Без витиеватых метафор и «фиолетовой прозы».
+    GENERAL: два связанных абзаца (по 3–4 коротких предложения), отражающих публичные действия, эффекты и будущее напряжение.
+    Имена игроков использовать РОВНО в данном написании. Стилистика — динамичный рассказ, без фиолетовой прозы.
     """
     setting = str(snapshot.get("setting", "")).strip()
     location = str(snapshot.get("location", "")).strip()
@@ -370,9 +438,8 @@ def build_general_story_prompt(
     eff_digest = _summarize_effects(snapshot, effects)
 
     style = (
-        "Пиши просто и предметно. Короткие ясные предложения. "
-        "Опиши последовательность событий и последствия, а не настроения. "
-        "Избегай туманных сравнений, витиеватых метафор и поэтизмов."
+        "Пиши предметно, но живо. Используй конкретные действия, реакции, ощущения. "
+        "Предложения короткие и ясные; избегай витиеватых метафор."
     )
 
     parts: List[str] = []
@@ -398,15 +465,27 @@ def build_general_story_prompt(
         parts.append("Опорный план (BeatPlan):\n" + json.dumps(_jsonable(beat_plan), ensure_ascii=False) + "\n")
     if open_threads:
         parts.append("Открытые нити (заверши одну или продвинь одну вперёд):\n" + json.dumps(open_threads[:4], ensure_ascii=False) + "\n")
+    if outline:
+        bullets = outline.get("bullets") if isinstance(outline, dict) else None
+        if bullets:
+            outline_lines = "\n".join(f"• {str(b)}" for b in bullets if str(b).strip())
+            if outline_lines:
+                parts.append("Костяк сцены (пройди по пунктам, сохраняя логику и покрытие):\n" + outline_lines + "\n")
+        must_ids = outline.get("must_include_ids") if isinstance(outline, dict) else None
+        if must_ids:
+            must_outline = "\n".join(f"- {str(m)}" for m in must_ids if str(m).strip())
+            if must_outline:
+                parts.append("Эти элементы ОБЯЗАТЕЛЬНО должны звучать дословно или в близкой формулировке:\n" + must_outline + "\n")
 
     parts.append(
         _banlist_block(forbidden)
         + "Задание:\n"
         f"{style} "
-        "Напиши ОДИН цельный абзац (6–8 предложений) общей истории текущего хода. "
-        "Вплети КАЖДОЕ публичное действие через последствия (реакции мира/NPC, риски, положение). "
-        "Вставь минимум ДВА конкретных факта из effects (предметы/флаги/локация/NPC/раны/позиции) "
-        "и ВСЕ факты из списка выше (если он есть). "
+        "Напиши ДВА абзаца общей истории текущего хода. Первый — непосредственные действия и реакции, второй — последствия, "
+        "риски и новый крючок. Каждый абзац 3–4 предложения. "
+        "Вплети КАЖДОЕ публичное действие через реакции мира или NPC. "
+        "Вставь минимум ДВА конкретных факта из effects (предметы/флаги/локация/NPC/раны/позиции) и ВСЕ факты из списка выше (если он есть). "
+        "Отрази хотя бы один пункт из открытых нитей или создай новое напряжение, если нитей нет. "
         "Имена игроков используй ровно в данном написании. "
         "Не пересказывай прошлый абзац и не цитируй его дословно; история должна сдвинуться на 1–2 шага вперёд. "
         "Запрещено: списки в тексте, мета/бот/чат/четвёртая стена. /no_think"
