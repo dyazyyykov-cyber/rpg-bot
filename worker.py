@@ -359,5 +359,5 @@ def main() -> None:
 if __name__ == "__main__":
     # точка входа воркера
     from core.db import init_db  # опционально, если нужно мигрировать
-    logger.info("DB: init ok")
+    asyncio.run(init_db())
     main()
