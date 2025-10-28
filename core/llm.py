@@ -198,8 +198,146 @@ def find_forbidden_hits(text: str, forbidden: Optional[List[str]]) -> List[str]:
     return hits
 
 
+def _build_response_format(schema: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Return response_format payload for JSON-guided decoding when possible."""
+
+    if not schema:
+        return None
+
+    try:
+        if not isinstance(schema, dict):
+            return None
+        return {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "response",
+                "schema": schema,
+                "strict": True,
+            },
+        }
+    except Exception:
+        return None
+
+
+def _flatten_message_content(message: Dict[str, Any]) -> str:
+    """Extract text content from the chat completion message payload."""
+
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: List[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                text = item.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+        return "".join(parts)
+    if content is None:
+        return ""
+    return str(content)
+
+
+def _strip_json_fences(text: str) -> str:
+    """Remove Markdown JSON fences if the model wrapped the payload."""
+
+    txt = text.strip()
+    if txt.startswith("```"):
+        parts = txt.split("\n", 1)
+        if len(parts) == 2:
+            body = parts[1]
+            if body.endswith("```"):
+                body = body[:-3]
+            return body.strip()
+    return txt
+
+
+async def request_llm_chat_json(
+    *,
+    messages: List[Dict[str, Any]],
+    schema: Optional[Dict[str, Any]] = None,
+    model: Optional[str] = None,
+    temperature: float = 0.0,
+    top_p: float = 0.0,
+    max_tokens: Optional[int] = None,
+    timeout_s: Optional[int] = None,
+    log_prefix: Optional[str] = None,
+    log_dir: Optional[str] = None,
+    seed: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Request a JSON response from the chat completion endpoint."""
+
+    payload: Dict[str, Any] = {
+        "model": model or LLM_MODEL_DEFAULT,
+        "messages": messages,
+        "temperature": float(temperature),
+        "top_p": float(top_p),
+    }
+    if max_tokens is not None:
+        try:
+            payload["max_tokens"] = int(max_tokens)
+        except Exception:
+            payload["max_tokens"] = max_tokens
+    if seed is not None:
+        try:
+            payload["seed"] = int(seed)
+        except Exception:
+            payload["seed"] = seed
+
+    response_format = _build_response_format(schema)
+    if response_format:
+        payload["response_format"] = response_format
+
+    req_id = _ts()
+    if log_dir:
+        _ensure_dir(log_dir)
+        base = (log_prefix or "LLM_JSON").replace(":", "_")
+        _dump_json(os.path.join(log_dir, f"{base}_request_{req_id}.json"), payload)
+
+    data = await _http_post_json(payload, timeout=timeout_s)
+
+    try:
+        usage = data.get("usage") or {}
+        logger.info("LLM USAGE[%s]: %s", log_prefix or "-", json.dumps(usage, ensure_ascii=False))
+    except Exception:
+        pass
+
+    try:
+        message = data["choices"][0]["message"]
+    except Exception as exc:
+        raise RuntimeError(f"LLM JSON response has no message: {str(data)[:600]}") from exc
+
+    if isinstance(message, dict):
+        parsed = message.get("parsed")
+        if isinstance(parsed, dict):
+            content_dict = parsed
+        else:
+            raw = _flatten_message_content(message)
+            cleaned = _strip_json_fences(raw)
+            try:
+                content_dict = json.loads(cleaned or "{}")
+            except json.JSONDecodeError as exc:
+                logger.error("LLM JSON parse failed[%s]: %s", log_prefix or "-", cleaned[:400])
+                raise RuntimeError("LLM JSON response is not valid JSON") from exc
+    else:
+        raise RuntimeError("LLM JSON response message is not a dict")
+
+    if not isinstance(content_dict, dict):
+        raise RuntimeError("LLM JSON response did not return an object")
+
+    if log_dir:
+        base = (log_prefix or "LLM_JSON").replace(":", "_")
+        _dump_json(os.path.join(log_dir, f"{base}_response_{req_id}.json"), data)
+        _dump_json(os.path.join(log_dir, f"{base}_parsed_{req_id}.json"), content_dict)
+
+    return content_dict
+
+
 __all__ = [
     "generate_text",
+    "request_llm_chat_json",
     "find_forbidden_hits",
     "LLMRequestTimeoutError",
     "LLM_MODEL_DEFAULT",
