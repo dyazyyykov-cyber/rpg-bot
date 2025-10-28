@@ -201,47 +201,6 @@ async def _notify_generation_started(session_id: int, actual: int = 0, expected:
         {"received": int(actual or 0), "expected": int(expected or 0)},
     )
 
-async def _notify_effects(session_id: int, effects_obj: Any) -> None:
-    try:
-        # для дебага: складываем «валидные» эффекты рядом с логами сессии
-        sid = str(session_id)
-        turn_dir = os.path.join(".", "logs", f"session_{sid}")
-        os.makedirs(turn_dir, exist_ok=True)
-        with open(os.path.join(turn_dir, "last_effects.json"), "w", encoding="utf-8") as f:
-            if hasattr(effects_obj, "model_dump"):
-                json.dump(effects_obj.model_dump(exclude_none=True), f, ensure_ascii=False, indent=2)  # type: ignore
-            else:
-                json.dump(effects_obj, f, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
-    logger.info("Turn[%s]: effects applied", session_id)
-
-async def _notify_raw(session_id: int, raw_obj: Any) -> None:
-    text = raw_obj.text if hasattr(raw_obj, "text") else str(raw_obj)
-    logger.info("Turn[%s]: raw story ready | raw(%d): %s", session_id, len(text), (text[:155] + "...") if len(text) > 155 else text)
-
-async def _notify_private(session_id: int, player_id: str, story_obj: Any) -> None:
-    text = story_obj.text if hasattr(story_obj, "text") else str(story_obj)
-    echo = getattr(story_obj, "echo_of_action", None)
-    logger.info(
-        "Turn[%s]: private for pid=%s | text(%d): %s | echo=%s",
-        session_id, player_id, len(text),
-        (text[:120] + "...") if len(text) > 120 else text,
-        f"echo({len(echo)}): {echo}" if echo else "—",
-    )
-    if hasattr(story_obj, "model_dump"):
-        payload: Dict[str, Any] = story_obj.model_dump(exclude_none=True)  # type: ignore[attr-defined]
-    elif isinstance(story_obj, dict):
-        payload = {k: v for k, v in story_obj.items() if v is not None}
-    else:
-        payload = {
-            "text": text,
-            "echo_of_action": echo,
-            "highlights": getattr(story_obj, "highlights", None),
-        }
-    payload["player_id"] = str(player_id or "")
-    await _publish_event(session_id, "private_story", payload)
-
 async def _notify_general(session_id: int, story_obj: Any) -> None:
     text = story_obj.text if hasattr(story_obj, "text") else str(story_obj)
     logger.info("Turn[%s]: general | text(%d): %s", session_id, len(text), (text[:155] + "...") if len(text) > 155 else text)
@@ -264,9 +223,6 @@ def make_callbacks_for_session(session_id: int) -> TurnIOCallbacks:
         save_state=lambda st: _save_state(session_id, st),
         await_actions=lambda exp, timeout, poll: _await_actions_for_session(session_id, exp, timeout, poll),
         notify_generation_started=lambda actual=0, expected=0: _notify_generation_started(session_id, actual, expected),
-        notify_effects=lambda eff: _notify_effects(session_id, eff),
-        notify_raw_story=lambda raw: _notify_raw(session_id, raw),
-        notify_private_story=lambda pid, st: _notify_private(session_id, pid, st),
         notify_general_story=lambda st: _notify_general(session_id, st),
         telemetry=lambda data: _notify_telemetry(session_id, data),
     )
